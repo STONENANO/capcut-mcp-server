@@ -61,6 +61,28 @@ const header = Buffer.concat([
 const audioPath = path.join(MEDIA, 'smoke-tone.wav');
 await writeFile(audioPath, header);
 
+// Probe the backend first. Without it every subsequent check fails for the same
+// single reason, and eight cascading failures bury the one line that matters.
+try {
+  const probe = await fetch(`${API}/get_transition_types`, {
+    method: 'GET',
+    signal: AbortSignal.timeout(4000),
+  });
+  if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+} catch (error) {
+  const why = error?.name === 'TimeoutError' ? 'it did not respond in time' : 'nothing is listening';
+  console.error(
+    `\nVectCutAPI is not reachable at ${API} (${why}).\n\n` +
+      'Start it in another terminal, and leave it running:\n\n' +
+      '    cd ~/VectCutAPI\n' +
+      '    python3 capcut_server.py --host 127.0.0.1 --port 9000\n\n' +
+      'If that fails with "unsupported operand type(s) for |", apply\n' +
+      'vectcutapi/python39-compat.patch or use Python 3.10+.\n' +
+      `If it is listening on another port, set CAPCUT_API_URL (currently ${API}).\n`
+  );
+  process.exit(1);
+}
+
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(ROOT, 'dist', 'index.js')],
@@ -93,6 +115,15 @@ console.log('\n-- editing tools --');
 const draft = await call('capcut_create_draft', { width: 1080, height: 1920 });
 const draftId = draft.structuredContent?.draft_id;
 report(Boolean(draftId), `draft_id returned from the backend's "output" field`, String(draftId));
+
+if (!draftId) {
+  // Everything below needs a draft. Continuing would report the same root cause
+  // a dozen more times and then crash on an undefined path.
+  console.error('\nNo draft was created, so the remaining checks cannot run.');
+  console.error(textOf(draft));
+  await client.close();
+  process.exit(1);
+}
 
 const effects = await client.callTool({
   name: 'capcut_list_asset_types',
