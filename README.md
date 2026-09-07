@@ -248,7 +248,7 @@ tool result says the draft may not appear rather than reporting a clean save.
 
 ```bash
 npm run typecheck   # tsc over src and tests
-npm test            # 94 tests, no network or backend needed
+npm test            # 112 tests, no network or backend needed
 npm run build
 npm run smoke       # manual: needs a running VectCutAPI (see scripts/smoke.mjs)
 ```
