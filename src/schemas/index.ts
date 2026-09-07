@@ -180,7 +180,11 @@ const AddTextShape = {
   background_color: HexColorSchema.default('#000000'),
   background_alpha: UnitIntervalSchema.default(0)
     .describe('Background opacity; 0 means no background is drawn'),
-  background_style: z.number().int().min(0).max(2).default(0),
+  // CapCut has exactly two background styles, and the draft library maps them
+  // with `(0, 2)[style - 1]`. Passing 0 indexes [-1] and silently selects style
+  // 2, so the accepted range starts at 1.
+  background_style: z.number().int().min(1).max(2).default(1)
+    .describe('Text background style: 1 or 2 (CapCut offers no others)'),
   background_round_radius: UnitIntervalSchema.default(0),
   shadow_enabled: z.boolean().default(false),
   shadow_color: HexColorSchema.default('#000000'),
@@ -250,7 +254,8 @@ const AddSubtitleShape = {
   background_color: HexColorSchema.default('#000000'),
   background_alpha: UnitIntervalSchema.default(0)
     .describe('Background opacity; 0 means no background is drawn'),
-  background_style: z.number().int().min(0).max(2).default(0),
+  background_style: z.number().int().min(1).max(2).default(1)
+    .describe('Subtitle background style: 1 or 2 (CapCut offers no others)'),
   transform_x: TransformSchema.default(0),
   transform_y: TransformSchema.default(-0.8).describe('Vertical offset; -0.8 sits near the bottom'),
   scale_x: ScaleSchema.default(1),
