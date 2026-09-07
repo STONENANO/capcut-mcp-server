@@ -8,8 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import test, { beforeEach, describe } from 'node:test';
 import {
@@ -25,6 +24,7 @@ import {
   restoreBackup,
 } from '../src/services/backup.js';
 import { canonicalizeRoot, PathAccessError } from '../src/security/paths.js';
+import { tempDir } from './helpers.js';
 
 const DRAFT_ID = 'dfd_project1';
 const CONTENT_V1 = JSON.stringify({ tracks: ['original'] });
@@ -34,7 +34,7 @@ let draftRoot: string;
 let projectDir: string;
 
 async function makeProject(): Promise<void> {
-  draftRoot = await canonicalizeRoot(await mkdtemp(path.join(os.tmpdir(), 'capcut-drafts-')));
+  draftRoot = await tempDir('capcut-drafts-');
   projectDir = path.join(draftRoot, DRAFT_ID);
   await mkdir(path.join(projectDir, 'assets', 'video'), { recursive: true });
   await writeFile(path.join(projectDir, 'draft_info.json'), CONTENT_V1);
@@ -62,7 +62,7 @@ describe('backup stamps', () => {
 
 describe('atomic writes', () => {
   test('leave no temp file behind and replace content wholesale', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'capcut-atomic-'));
+    const dir = await tempDir('capcut-atomic-');
     const target = path.join(dir, 'draft_info.json');
     await atomicWriteFile(target, CONTENT_V1);
     await atomicWriteFile(target, CONTENT_V2);
@@ -155,7 +155,7 @@ describe('createBackup', () => {
   });
 
   test('does not follow symlinks inside a project', async () => {
-    const outside = await canonicalizeRoot(await mkdtemp(path.join(os.tmpdir(), 'capcut-out-')));
+    const outside = await tempDir('capcut-out-');
     await writeFile(path.join(outside, 'secret.txt'), 'top secret');
     await symlink(path.join(outside, 'secret.txt'), path.join(projectDir, 'link-to-secret'));
 
@@ -164,9 +164,7 @@ describe('createBackup', () => {
   });
 
   test('reports rather than throws when there is nothing to back up', async () => {
-    const emptyRoot = await canonicalizeRoot(
-      await mkdtemp(path.join(os.tmpdir(), 'capcut-empty-'))
-    );
+    const emptyRoot = await tempDir('capcut-empty-');
     const missing = await createBackup(path.join(emptyRoot, 'nope'), emptyRoot, 'nope');
     assert.equal(missing.created, false);
     assert.match(missing.skippedReason!, /does not exist/);
@@ -200,7 +198,7 @@ describe('createBackup', () => {
   });
 
   test('resolveProjectDir rejects a project symlinked out of the root', async () => {
-    const outside = await canonicalizeRoot(await mkdtemp(path.join(os.tmpdir(), 'capcut-out2-')));
+    const outside = await tempDir('capcut-out2-');
     await symlink(outside, path.join(draftRoot, 'dfd_escape'));
     await assert.rejects(resolveProjectDir('dfd_escape', draftRoot), PathAccessError);
   });
@@ -270,7 +268,7 @@ describe('restoreBackup', () => {
   });
 
   test('refuses a snapshot directory symlinked outside the backup tree', async () => {
-    const outside = await canonicalizeRoot(await mkdtemp(path.join(os.tmpdir(), 'capcut-evil-')));
+    const outside = await tempDir('capcut-evil-');
     await writeFile(path.join(outside, 'draft_info.json'), '{"evil":true}');
     const backupRoot = backupDirFor(draftRoot, DRAFT_ID);
     await mkdir(backupRoot, { recursive: true });

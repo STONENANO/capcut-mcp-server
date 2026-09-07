@@ -7,8 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import test, { describe } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -18,6 +17,7 @@ import { loadConfig, type ServerConfig } from '../src/config.js';
 import { CapCutApiClient } from '../src/services/api-client.js';
 import { BACKUP_DIR_NAME } from '../src/services/backup.js';
 import { registerTools } from '../src/tools/index.js';
+import { tempDir } from './helpers.js';
 
 interface RecordedRequest {
   url: string;
@@ -423,8 +423,8 @@ describe('media guards at the tool boundary', () => {
   });
 
   test('local media is accepted only from an approved directory', async () => {
-    const approved = await mkdtemp(path.join(os.tmpdir(), 'capcut-tool-media-'));
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'capcut-tool-other-'));
+    const approved = await tempDir('capcut-tool-media-');
+    const outside = await tempDir('capcut-tool-other-');
     await writeFile(path.join(approved, 'clip.mp4'), 'x');
     await writeFile(path.join(outside, 'clip.mp4'), 'x');
 
@@ -480,7 +480,7 @@ describe('media guards at the tool boundary', () => {
 
 describe('save_draft backups', () => {
   async function draftDirWithProject(): Promise<{ draftDir: string; projectDir: string }> {
-    const draftDir = await mkdtemp(path.join(os.tmpdir(), 'capcut-save-'));
+    const draftDir = await tempDir('capcut-save-');
     const projectDir = path.join(draftDir, 'dfd_project');
     await mkdir(projectDir, { recursive: true });
     await writeFile(path.join(projectDir, 'draft_content.json'), '{"v":1}');
@@ -634,7 +634,7 @@ describe('save_draft backups', () => {
 
 describe('restore tool', () => {
   test('lists versions without changing anything, then restores one', async () => {
-    const draftDir = await mkdtemp(path.join(os.tmpdir(), 'capcut-restore-'));
+    const draftDir = await tempDir('capcut-restore-');
     const projectDir = path.join(draftDir, 'dfd_project');
     await mkdir(projectDir, { recursive: true });
     await writeFile(path.join(projectDir, 'draft_content.json'), '{"v":1}');
@@ -673,7 +673,7 @@ describe('restore tool', () => {
   });
 
   test('rejects arbitrary source and destination paths', async () => {
-    const draftDir = await mkdtemp(path.join(os.tmpdir(), 'capcut-restore2-'));
+    const draftDir = await tempDir('capcut-restore2-');
     await mkdir(path.join(draftDir, 'dfd_project'), { recursive: true });
 
     const { fetchImpl } = fakeBackend();

@@ -4,8 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import test, { describe } from 'node:test';
 import { classifyAddress } from '../src/security/ip-ranges.js';
@@ -14,6 +13,7 @@ import {
   validateMediaReference,
   type MediaGuardOptions,
 } from '../src/security/media-url.js';
+import { tempDir } from './helpers.js';
 
 /** Guard options that never touch the network: DNS and fetch are both stubbed. */
 function offlineOptions(overrides: Partial<MediaGuardOptions> = {}): MediaGuardOptions {
@@ -232,8 +232,8 @@ describe('media reference validation', () => {
   });
 
   test('local files are only accepted from approved directories', async () => {
-    const approved = await mkdtemp(path.join(os.tmpdir(), 'capcut-media-'));
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'capcut-other-'));
+    const approved = await tempDir('capcut-media-');
+    const outside = await tempDir('capcut-other-');
     await writeFile(path.join(approved, 'clip.mp4'), 'x');
     await writeFile(path.join(outside, 'secret.mp4'), 'x');
 

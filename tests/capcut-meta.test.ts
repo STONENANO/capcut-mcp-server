@@ -8,11 +8,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import test, { beforeEach, describe } from 'node:test';
 import { draftUuid, repairDraftMetadata } from '../src/services/capcut-meta.js';
+import { tempDir } from './helpers.js';
 
 /** The values VectCutAPI's template actually ships with. */
 const TEMPLATE_META = {
@@ -32,7 +32,7 @@ let draftRoot: string;
 let projectDir: string;
 
 async function makeSavedDraft(meta: object = TEMPLATE_META, duration = 8_000_000): Promise<void> {
-  draftRoot = await mkdtemp(path.join(os.tmpdir(), 'capcut-meta-'));
+  draftRoot = await tempDir('capcut-meta-');
   projectDir = path.join(draftRoot, DRAFT_ID);
   await mkdir(projectDir, { recursive: true });
   await writeFile(path.join(projectDir, 'draft_meta_info.json'), JSON.stringify(meta, null, 2));
@@ -114,7 +114,7 @@ describe('repairDraftMetadata', () => {
 
   test('reports rather than throws when the metadata is missing or corrupt', async () => {
     await makeSavedDraft();
-    const empty = await mkdtemp(path.join(os.tmpdir(), 'capcut-nometa-'));
+    const empty = await tempDir('capcut-nometa-');
     const missing = await repairDraftMetadata(empty, empty, DRAFT_ID);
     assert.equal(missing.repaired, false);
     assert.match(missing.reason!, /not present/);
