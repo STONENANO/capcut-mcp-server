@@ -21,6 +21,8 @@ const TEMPLATE_META = {
   draft_id: '989869B1-B560-489C-9C6F-4B444F24BF36',
   draft_name: '0707',
   draft_cover: 'draft_cover.jpg',
+  // Present in VectCutAPI's template and in CapCut's own projects.
+  draft_need_rename_folder: false,
   tm_draft_create: 1751876007857286,
   tm_draft_modified: 1751876105604683,
   tm_duration: 0,
@@ -107,9 +109,34 @@ describe('repairDraftMetadata', () => {
 
   test('is idempotent: a second run finds nothing to change', async () => {
     assert.equal((await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID)).repaired, true);
-    const second = await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID, new Date(0));
+    const second = await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID, { now: new Date(0) });
     // Only the modified timestamp may differ, and a fixed clock removes that.
     assert.deepEqual(second.changed.filter(f => f !== 'tm_draft_modified'), []);
+  });
+
+  test('uses the draft id as the display name by default', async () => {
+    await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID);
+    const meta = await readMeta();
+    assert.equal(meta.draft_name, DRAFT_ID);
+    // The folder is addressed by draft id, so CapCut must not rename it.
+    assert.equal(meta.draft_need_rename_folder, false);
+  });
+
+  test('uses a supplied display name without touching the folder identity', async () => {
+    await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID, {
+      displayName: '  Launch promo v2  ',
+    });
+    const meta = await readMeta();
+    assert.equal(meta.draft_name, 'Launch promo v2', 'the name is trimmed');
+    // Everything that locates the project still points at the draft id folder.
+    assert.equal(meta.draft_fold_path, projectDir);
+    assert.equal(meta.draft_id, draftUuid(DRAFT_ID));
+    assert.equal(meta.draft_need_rename_folder, false);
+  });
+
+  test('falls back to the draft id for a blank display name', async () => {
+    await repairDraftMetadata(projectDir, draftRoot, DRAFT_ID, { displayName: '   ' });
+    assert.equal((await readMeta()).draft_name, DRAFT_ID);
   });
 
   test('reports rather than throws when the metadata is missing or corrupt', async () => {

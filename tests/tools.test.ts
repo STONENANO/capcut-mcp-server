@@ -343,6 +343,33 @@ describe('VectCutAPI request compatibility', () => {
     }
   });
 
+  test('no add_* tool offers width/height, which the backend would discard', async () => {
+    // VectCutAPI only reads width/height when it has to create a draft itself.
+    // Every tool here requires a draft_id, so offering them would be a knob
+    // that accepts a value and does nothing. Verified by sweeping each
+    // parameter against the resulting project JSON.
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig(), fetchImpl);
+    const { tools } = await client.listTools();
+
+    for (const tool of tools) {
+      const properties = Object.keys(
+        (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}
+      );
+      if (tool.name === 'capcut_create_draft') {
+        assert.ok(properties.includes('width'), 'create_draft sets the canvas size');
+        continue;
+      }
+      for (const dead of ['width', 'height']) {
+        assert.equal(
+          properties.includes(dead),
+          false,
+          `${tool.name} must not offer ${dead}: the backend discards it`
+        );
+      }
+    }
+  });
+
   test('add_audio does not offer fade parameters the backend ignores', async () => {
     const { fetchImpl } = fakeBackend();
     const client = await connect(await testConfig(), fetchImpl);
@@ -601,6 +628,44 @@ describe('save_draft backups', () => {
     assert.equal(isError(result), true);
     assert.match(textOf(result), /Refusing to save/);
     assert.equal(requests.length, 0, 'the destructive save must not be attempted');
+  });
+
+  test('save_draft can set the name CapCut displays', async () => {
+    const { draftDir, projectDir } = await draftDirWithProject();
+    await writeFile(path.join(projectDir, 'draft_meta_info.json'), JSON.stringify({
+      draft_name: '0707',
+      draft_id: '989869B1-B560-489C-9C6F-4B444F24BF36',
+    }));
+
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig({ draftDir }), fetchImpl);
+    const result = await client.callTool({
+      name: 'capcut_save_draft',
+      arguments: { draft_id: 'dfd_project', name: 'Launch promo' },
+    });
+
+    assert.equal(isError(result), false, textOf(result));
+    const meta = JSON.parse(
+      await readFile(path.join(projectDir, 'draft_meta_info.json'), 'utf8')
+    ) as Record<string, unknown>;
+    assert.equal(meta.draft_name, 'Launch promo');
+    // The folder keeps the draft id, so backups and restore still resolve.
+    assert.equal(meta.draft_fold_path, projectDir);
+    assert.equal(meta.draft_need_rename_folder, false);
+  });
+
+  test('save_draft rejects a display name with path separators or control chars', async () => {
+    const { draftDir } = await draftDirWithProject();
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig({ draftDir }), fetchImpl);
+
+    for (const name of ['../escape', 'a/b', 'a\\b', 'bad\u0000name', '   ', '']) {
+      const result = await client.callTool({
+        name: 'capcut_save_draft',
+        arguments: { draft_id: 'dfd_project', name },
+      });
+      assert.equal(isError(result), true, `${JSON.stringify(name)} should be rejected`);
+    }
   });
 
   test('save_draft refuses a draft id that escapes the approved draft directory', async () => {

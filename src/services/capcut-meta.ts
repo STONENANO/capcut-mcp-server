@@ -75,8 +75,9 @@ export async function repairDraftMetadata(
   projectDir: string,
   draftRoot: string,
   draftId: string,
-  now: Date = new Date()
+  options: { displayName?: string; now?: Date } = {}
 ): Promise<MetadataRepair> {
+  const now = options.now ?? new Date();
   const metaPath = path.join(projectDir, META_FILE);
   if (!(await fileExists(metaPath))) {
     return { repaired: false, changed: [], reason: `${META_FILE} is not present in the saved draft` };
@@ -111,10 +112,15 @@ export async function repairDraftMetadata(
   const updates: Record<string, unknown> = {
     draft_fold_path: projectDir,
     draft_root_path: draftRoot,
-    draft_name: draftId,
+    // What CapCut shows in its project list. Defaults to the folder name, which
+    // is what CapCut itself does for projects it creates.
+    draft_name: options.displayName?.trim() || draftId,
     draft_id: draftUuid(draftId),
     tm_draft_modified: micros,
     tm_duration: duration,
+    // The folder is addressed by draft id for backups and restore, so CapCut
+    // must not rename it to match a display name that differs.
+    draft_need_rename_folder: false,
   };
 
   // Only claim a creation time if the template's is being carried over.

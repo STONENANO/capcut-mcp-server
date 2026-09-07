@@ -159,7 +159,7 @@ Every tool's description begins with `[READ-ONLY]` or `[MUTATING]`.
 | `capcut_add_keyframe` | MUTATING | Animate track properties. |
 | `capcut_add_effect` | MUTATING | Apply a CapCut visual effect. |
 | `capcut_add_sticker` | MUTATING | Add a CapCut sticker by resource id. |
-| `capcut_save_draft` | MUTATING (destructive) | Write into `CAPCUT_DRAFT_DIR`, after a backup. |
+| `capcut_save_draft` | MUTATING (destructive) | Write into `CAPCUT_DRAFT_DIR`, after a backup. Optional `name` sets the CapCut display name. |
 | `capcut_list_asset_types` | READ-ONLY | List valid effect/transition/font/animation names. |
 | `capcut_restore_backup` | MUTATING (destructive) | List or restore automatic backups. |
 
@@ -172,6 +172,25 @@ Call `capcut_list_asset_types` first rather than guessing.
 Segments on a single track may not overlap in time — CapCut rejects the second
 one. Layer overlapping elements by giving them different `track_name` values.
 This applies to video, image, audio, text and effect segments alike.
+
+Some parameters need an **enabling** parameter before they do anything, and the
+backend accepts them silently either way. Each tool's schema now says so; the
+set is:
+
+| Ignored unless | … you also set |
+| --- | --- |
+| `border_color`, `border_alpha` | `border_width` > 0 |
+| `background_color`, `background_style`, `background_round_radius` | `background_alpha` > 0 |
+| `shadow_color`, `shadow_alpha`, `shadow_angle`, `shadow_distance`, `shadow_smoothing` | `shadow_enabled: true` |
+| `intro_duration` / `outro_duration` | `intro_animation` / `outro_animation` |
+| `transition_duration` | `transition` |
+| `effect_params` (audio) | `effect_type` |
+
+Verified by sweeping every parameter of every tool against the resulting project
+JSON, twice: once alone, once with its enabler on. Nothing else was inert. The
+one genuinely dead pair, `width`/`height` on the `add_*` tools, has been removed
+— VectCutAPI only reads those when it creates a draft itself, which these tools
+never let it do.
 
 A `transition` attaches to the **earlier** clip of a pair on the same track — it
 plays between that segment and the next one. Set on the later clip, or on a clip

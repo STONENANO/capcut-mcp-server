@@ -90,6 +90,15 @@ const UnitIntervalSchema = z.number().finite().min(0).max(1);
 const TransformSchema = z.number().finite().min(-10).max(10);
 const ScaleSchema = z.number().finite().min(0.01).max(20);
 
+/**
+ * Canvas size. Offered ONLY by capcut_create_draft.
+ *
+ * VectCutAPI's add_* routes accept width/height too, but only consult them when
+ * they have to create a draft themselves (draft_id omitted). Every tool here
+ * requires a draft_id, so on those routes the values are read and discarded --
+ * verified by sweeping each parameter against the resulting project JSON. They
+ * are not offered, so nobody can set a canvas size that silently does nothing.
+ */
 const CanvasShape = {
   width: z.number().int().min(360).max(4096).default(DEFAULT_CANVAS.width)
     .describe('Canvas width in pixels'),
@@ -132,10 +141,9 @@ const AddVideoShape = {
     .describe('Render order among tracks; higher draws on top'),
   transition: TransitionSchema.optional(),
   transition_duration: z.number().finite().min(0).max(10).default(0.5)
-    .describe('Transition length in seconds'),
+    .describe('Transition length in seconds; ignored unless transition is set'),
   background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional()
     .describe('Blurred-background strength: 1 light, 2 medium, 3 strong, 4 maximum'),
-  ...CanvasShape,
   ...CommonShape,
 };
 
@@ -154,8 +162,7 @@ const AddAudioShape = {
   effect_type: AssetNameSchema.optional()
     .describe('Audio effect from capcut_list_asset_types(category="audio_effect")'),
   effect_params: z.array(z.number().finite().min(0).max(100)).max(16).optional()
-    .describe('Audio effect parameters, each 0-100'),
-  ...CanvasShape,
+    .describe('Audio effect parameters, each 0-100; ignored unless effect_type is set'),
   ...CommonShape,
 };
 
@@ -173,11 +180,14 @@ const AddTextShape = {
   transform_x: TransformSchema.default(0).describe('Horizontal offset; 0 is centred'),
   transform_y: TransformSchema.default(0).describe('Vertical offset; 0 is centred'),
   vertical: z.boolean().default(false).describe('Render the text vertically'),
-  border_color: HexColorSchema.default('#000000'),
-  border_alpha: UnitIntervalSchema.default(1),
+  border_color: HexColorSchema.default('#000000')
+    .describe('Outline colour; only drawn when border_width > 0'),
+  border_alpha: UnitIntervalSchema.default(1)
+    .describe('Outline opacity; only drawn when border_width > 0'),
   border_width: z.number().finite().min(0).max(100).default(0)
     .describe('Outline width; 0 disables the outline'),
-  background_color: HexColorSchema.default('#000000'),
+  background_color: HexColorSchema.default('#000000')
+    .describe('Background colour; only drawn when background_alpha > 0'),
   background_alpha: UnitIntervalSchema.default(0)
     .describe('Background opacity; 0 means no background is drawn'),
   // CapCut has exactly two background styles, and the draft library maps them
@@ -187,19 +197,26 @@ const AddTextShape = {
     .describe('Text background style: 1 or 2 (CapCut offers no others)'),
   background_round_radius: UnitIntervalSchema.default(0),
   shadow_enabled: z.boolean().default(false),
-  shadow_color: HexColorSchema.default('#000000'),
-  shadow_alpha: UnitIntervalSchema.default(0.9),
-  shadow_angle: z.number().finite().min(-180).max(180).default(-45),
-  shadow_distance: z.number().finite().min(0).max(100).default(5),
-  shadow_smoothing: UnitIntervalSchema.default(0.15),
+  // Every shadow_* value below is ignored unless shadow_enabled is true.
+  shadow_color: HexColorSchema.default('#000000')
+    .describe('Requires shadow_enabled: true'),
+  shadow_alpha: UnitIntervalSchema.default(0.9)
+    .describe('Requires shadow_enabled: true'),
+  shadow_angle: z.number().finite().min(-180).max(180).default(-45)
+    .describe('Requires shadow_enabled: true'),
+  shadow_distance: z.number().finite().min(0).max(100).default(5)
+    .describe('Requires shadow_enabled: true'),
+  shadow_smoothing: UnitIntervalSchema.default(0.15)
+    .describe('Requires shadow_enabled: true'),
   intro_animation: AssetNameSchema.optional()
     .describe('Entrance animation from capcut_list_asset_types(category="text_intro")'),
-  intro_duration: z.number().finite().min(0).max(10).default(0.5),
+  intro_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Length of intro_animation; ignored unless intro_animation is set'),
   outro_animation: AssetNameSchema.optional()
     .describe('Exit animation from capcut_list_asset_types(category="text_outro")'),
-  outro_duration: z.number().finite().min(0).max(10).default(0.5),
+  outro_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Length of outro_animation; ignored unless outro_animation is set'),
   track_name: TrackNameSchema.default('text_main'),
-  ...CanvasShape,
   ...CommonShape,
 };
 
@@ -216,14 +233,16 @@ const AddImageShape = {
   relative_index: z.number().int().min(-100).max(100).default(0),
   intro_animation: AssetNameSchema.optional()
     .describe('Entrance animation from capcut_list_asset_types(category="intro_animation")'),
-  intro_animation_duration: z.number().finite().min(0).max(10).default(0.5),
+  intro_animation_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Ignored unless intro_animation is set'),
   outro_animation: AssetNameSchema.optional()
     .describe('Exit animation from capcut_list_asset_types(category="outro_animation")'),
-  outro_animation_duration: z.number().finite().min(0).max(10).default(0.5),
+  outro_animation_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Ignored unless outro_animation is set'),
   transition: TransitionSchema.optional(),
-  transition_duration: z.number().finite().min(0).max(10).default(0.5),
+  transition_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Transition length in seconds; ignored unless transition is set'),
   background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
-  ...CanvasShape,
   ...CommonShape,
 };
 
@@ -248,10 +267,13 @@ const AddSubtitleShape = {
   underline: z.boolean().default(false),
   alpha: UnitIntervalSchema.default(1).describe('Text opacity'),
   vertical: z.boolean().default(false),
-  border_color: HexColorSchema.default('#000000'),
-  border_alpha: UnitIntervalSchema.default(1),
+  border_color: HexColorSchema.default('#000000')
+    .describe('Outline colour; only drawn when border_width > 0'),
+  border_alpha: UnitIntervalSchema.default(1)
+    .describe('Outline opacity; only drawn when border_width > 0'),
   border_width: z.number().finite().min(0).max(100).default(0),
-  background_color: HexColorSchema.default('#000000'),
+  background_color: HexColorSchema.default('#000000')
+    .describe('Background colour; only drawn when background_alpha > 0'),
   background_alpha: UnitIntervalSchema.default(0)
     .describe('Background opacity; 0 means no background is drawn'),
   background_style: z.number().int().min(1).max(2).default(1)
@@ -262,7 +284,6 @@ const AddSubtitleShape = {
   scale_y: ScaleSchema.default(1),
   rotation: z.number().finite().min(-360).max(360).default(0),
   track_name: TrackNameSchema.default('subtitle'),
-  ...CanvasShape,
   ...CommonShape,
 };
 
@@ -306,7 +327,6 @@ const AddEffectShape = {
   params: z.array(z.number().finite().min(0).max(100)).max(16).default([])
     .describe('Effect parameters, each 0-100; an empty list uses the effect defaults'),
   track_name: TrackNameSchema.default('effect_01'),
-  ...CanvasShape,
   ...CommonShape,
 };
 
@@ -328,12 +348,24 @@ const AddStickerShape = {
   flip_vertical: z.boolean().default(false),
   track_name: TrackNameSchema.default('sticker_main'),
   relative_index: z.number().int().min(-100).max(100).default(0),
-  ...CanvasShape,
   ...CommonShape,
 };
 
 const SaveDraftShape = {
   draft_id: DraftIdSchema,
+  name: z
+    .string()
+    .min(1)
+    .max(120)
+    .refine(v => v.trim() !== '', 'Name cannot be only whitespace')
+    .refine(v => !/[\0-\x1f\x7f]/.test(v), 'Name must not contain control characters')
+    .refine(v => !/[/\\]/.test(v), 'Name must not contain path separators')
+    .optional()
+    .describe(
+      'Display name shown in CapCut\'s project list. Defaults to the draft id. ' +
+        'The folder on disk keeps the draft id either way, so this only changes ' +
+        'what you see in CapCut.'
+    ),
   ...CommonShape,
 };
 

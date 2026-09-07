@@ -448,7 +448,10 @@ so the whole project is snapshotted first to
 <draft dir>/.smartcut_backups/<draft id>/<timestamp>/ -- outside the project, so
 the save cannot destroy it. If that snapshot cannot be taken, the save is not
 attempted. Recover one with capcut_restore_backup. Snapshots within
-CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.`
+CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.
+
+Pass 'name' to choose what CapCut shows in its project list; the folder on disk
+keeps the draft id regardless, so backups and restore are unaffected.`
       ),
       inputSchema: SaveDraftSchema,
       annotations: { ...MUTATING_ANNOTATIONS, destructiveHint: true },
@@ -476,7 +479,9 @@ CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.`
         // still claims to live on the template author's machine and shares one
         // UUID with every other draft. CapCut builds its Projects list from
         // that file, so without this the draft never appears.
-        const metadata = await repairDraftMetadata(projectDir, draftDir, input.draft_id);
+        const metadata = await repairDraftMetadata(projectDir, draftDir, input.draft_id, {
+          displayName: input.name,
+        });
 
         const payload = {
           saved: output,
