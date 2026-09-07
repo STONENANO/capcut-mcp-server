@@ -1,0 +1,40 @@
+Let VectCutAPI import on Python 3.9 (macOS system/Xcode Python).
+
+VectCutAPI declares requires-python = ">=3.10" and `add_text_impl.py` uses PEP
+604 annotations (`draft_id: str | None = None`). On Python 3.9 those are valid
+syntax but fail when the annotation is EVALUATED at import time:
+
+    TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+
+macOS ships Python 3.9 (and Xcode's python3 is 3.9), so `python3
+capcut_server.py` fails before the server starts.
+
+`from __future__ import annotations` makes every annotation in the module a
+lazily-evaluated string, which is exactly what PEP 604 needs on 3.9. An AST scan
+of the whole repository -- capcut_server.py, every *_impl.py, and all of
+pyJianYingDraft -- found PEP 604 unions in runtime-evaluated positions in this
+one file only (6 parameter annotations), and no other 3.10-only syntax such as
+match statements. Nothing in this module inspects __annotations__ at runtime, so
+turning them into strings changes no behaviour.
+
+This is a workaround, not a supported configuration: upstream targets 3.10+, so
+a future VectCutAPI update may reintroduce 3.10-only code. The durable fix is to
+run it on Python 3.11:
+
+    brew install python@3.11
+    python3.11 -m pip install -r requirements-pinned.txt
+    python3.11 capcut_server.py --host 127.0.0.1 --port 9000
+
+Apply with:
+    cd /path/to/VectCutAPI
+    git apply /path/to/capcut-mcp-server/vectcutapi/python39-compat.patch
+
+diff --git a/add_text_impl.py b/add_text_impl.py
+--- a/add_text_impl.py
++++ b/add_text_impl.py
+@@ -1,3 +1,5 @@
++from __future__ import annotations  # keep PEP 604 annotations lazy (Python 3.9)
++
+ import pyJianYingDraft as draft
+ from settings.local import IS_CAPCUT_ENV
+ from util import generate_draft_url, hex_to_rgb

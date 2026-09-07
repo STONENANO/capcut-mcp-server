@@ -56,15 +56,30 @@ to off. The `vectcutapi/` directory fixes both:
 git clone https://github.com/sun-guannan/VectCutAPI.git
 cd VectCutAPI
 
-git apply /path/to/capcut-mcp-server/vectcutapi/bind-localhost.patch
-git apply /path/to/capcut-mcp-server/vectcutapi/disable-cloud-upload.patch
-cp /path/to/capcut-mcp-server/vectcutapi/config.json .
+git apply ~/capcut-mcp-server/vectcutapi/bind-localhost.patch
+git apply ~/capcut-mcp-server/vectcutapi/disable-cloud-upload.patch
+git apply ~/capcut-mcp-server/vectcutapi/python39-compat.patch   # only on Python 3.9
+cp ~/capcut-mcp-server/vectcutapi/config.json .
 
-pip install -r /path/to/capcut-mcp-server/vectcutapi/requirements-pinned.txt
-python capcut_server.py --host 127.0.0.1 --port 9000
+pip3 install -r ~/capcut-mcp-server/vectcutapi/requirements-pinned.txt
+python3 capcut_server.py --host 127.0.0.1 --port 9000
 ```
 
 After the patch, `--host` defaults to loopback and refuses anything else.
+
+**Python version.** VectCutAPI declares `requires-python = ">=3.10"`, and macOS
+ships 3.9 — on which it fails at import with
+`TypeError: unsupported operand type(s) for |`. Check with `python3 --version`.
+On 3.10+, skip `python39-compat.patch`. On 3.9, either apply it (one line, and
+an AST scan of the whole repository found no other 3.10-only code) or install a
+newer Python, which is the durable option since upstream may reintroduce 3.10+
+syntax at any time:
+
+```bash
+brew install python@3.11
+python3.11 -m pip install -r ~/capcut-mcp-server/vectcutapi/requirements-pinned.txt
+python3.11 capcut_server.py --host 127.0.0.1 --port 9000
+```
 
 > VectCutAPI's code default is port **9000**; its own `config.json.example` says
 > **9001**. The bundled `config.json` pins 9000 to match `CAPCUT_API_URL` below.
