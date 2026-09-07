@@ -318,6 +318,31 @@ describe('VectCutAPI request compatibility', () => {
     assert.equal('position_y' in body, false);
   });
 
+  test('the transition parameter documents that it attaches to the earlier clip', async () => {
+    // VectCutAPI accepts a transition on any segment and validates only the
+    // name: on the later clip of a pair, or on a clip nothing follows, it is
+    // written into the project and renders nothing, with no warning. The
+    // parameter description is the only thing standing between a caller and
+    // that silent no-op, so pin it.
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig(), fetchImpl);
+    const { tools } = await client.listTools();
+
+    for (const name of ['capcut_add_video', 'capcut_add_image']) {
+      const properties = (tools.find(t => t.name === name)!.inputSchema as {
+        properties?: Record<string, { description?: string }>;
+      }).properties!;
+      const description = properties.transition?.description ?? '';
+      assert.match(description, /EARLIER/, `${name}.transition must say which clip it goes on`);
+      assert.match(description, /same track/i, `${name}.transition must state the same-track rule`);
+      assert.match(
+        description,
+        /silently ignored/i,
+        `${name}.transition must warn that a misplaced transition is a silent no-op`
+      );
+    }
+  });
+
   test('add_audio does not offer fade parameters the backend ignores', async () => {
     const { fetchImpl } = fakeBackend();
     const client = await connect(await testConfig(), fetchImpl);

@@ -150,6 +150,11 @@ Segments on a single track may not overlap in time — CapCut rejects the second
 one. Layer overlapping elements by giving them different `track_name` values.
 This applies to video, image, audio, text and effect segments alike.
 
+A `transition` attaches to the **earlier** clip of a pair on the same track — it
+plays between that segment and the next one. Set on the later clip, or on a clip
+nothing follows, it is written into the project and renders nothing, with no
+error. Only the transition *name* is validated.
+
 ### Example
 
 ```jsonc

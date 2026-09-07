@@ -229,7 +229,10 @@ timeline. Set end=0 to use the clip to its end.
 
 video_url must be an https:// URL or an absolute path inside an approved media
 directory (CAPCUT_MEDIA_DIRS). Private, loopback and metadata destinations are
-rejected before the backend ever fetches it.`
+rejected before the backend ever fetches it.
+
+Transitions attach to the EARLIER clip of a pair on the same track. Setting one
+on the later clip is accepted but renders nothing.`
       ),
       inputSchema: AddVideoSchema,
       annotations: MUTATING_ANNOTATIONS,
@@ -304,7 +307,8 @@ Position uses transform_x/transform_y and size uses scale_x/scale_y, matching
 CapCut's own model. VectCutAPI's /add_image has no rotation parameter, so none is
 offered; use capcut_add_keyframe on 'rotation' instead.
 
-image_url is validated exactly like video_url.`
+image_url is validated exactly like video_url. Transitions attach to the EARLIER
+clip of a pair on the same track; on the later clip they render nothing.`
       ),
       inputSchema: AddImageSchema,
       annotations: MUTATING_ANNOTATIONS,

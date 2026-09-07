@@ -60,6 +60,26 @@ const AssetNameSchema = z
   .refine(v => !/[\0\n\r]/.test(v), 'Asset name must not contain control characters')
   .describe('Exact asset name from capcut_list_asset_types');
 
+/**
+ * A CapCut transition, attached to the segment the cut happens AFTER.
+ *
+ * VectCutAPI accepts this on any segment and validates only the name: put it on
+ * the later clip, or on a clip with nothing after it on the same track, and the
+ * transition is written into the project but renders nothing. There is no
+ * warning, so the description has to carry the rule.
+ */
+const TransitionSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine(v => !/[\0\n\r]/.test(v), 'Transition name must not contain control characters')
+  .describe(
+    'Transition name from capcut_list_asset_types(category="transition"). ' +
+      'Set it on the EARLIER of the two clips -- it plays between this segment and ' +
+      'the next one on the SAME track. On the later clip, or on a clip nothing ' +
+      'follows, it is silently ignored.'
+  );
+
 const HexColorSchema = z
   .string()
   .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a 6-digit hex color such as #FFFFFF');
@@ -110,8 +130,7 @@ const AddVideoShape = {
   track_name: TrackNameSchema.default('video_main'),
   relative_index: z.number().int().min(-100).max(100).default(0)
     .describe('Render order among tracks; higher draws on top'),
-  transition: AssetNameSchema.optional()
-    .describe('Transition name from capcut_list_asset_types(category="transition")'),
+  transition: TransitionSchema.optional(),
   transition_duration: z.number().finite().min(0).max(10).default(0.5)
     .describe('Transition length in seconds'),
   background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional()
@@ -197,8 +216,7 @@ const AddImageShape = {
   outro_animation: AssetNameSchema.optional()
     .describe('Exit animation from capcut_list_asset_types(category="outro_animation")'),
   outro_animation_duration: z.number().finite().min(0).max(10).default(0.5),
-  transition: AssetNameSchema.optional()
-    .describe('Transition from capcut_list_asset_types(category="transition")'),
+  transition: TransitionSchema.optional(),
   transition_duration: z.number().finite().min(0).max(10).default(0.5),
   background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
   ...CanvasShape,
