@@ -1,127 +1,160 @@
-// API client for CapCut server communication
+/**
+ * VectCutAPI HTTP client.
+ *
+ * Talks only to the validated loopback backend. Uses the platform fetch rather
+ * than an HTTP library so there is one fewer dependency in the supply chain and
+ * no chance of a client-level feature (proxy env vars, automatic redirects to
+ * other hosts) reintroducing egress we just spent effort removing.
+ *
+ * Response shape note: VectCutAPI returns `{success, output, error}`. The
+ * payload lives in `output`, not `result`.
+ */
 
-import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
-import { API_BASE_URL } from '../constants.js';
-import type { ApiResponse } from '../types.js';
+import { ConfigError } from '../config.js';
+import { assertLoopbackBackendUrl } from '../security/backend-url.js';
 
-export class CapCutApiClient {
-  private client: AxiosInstance;
-
-  constructor(baseURL: string = API_BASE_URL) {
-    this.client = axios.create({
-      baseURL,
-      timeout: 60000, // 60 seconds timeout
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    // Add response interceptor for error handling
-    this.client.interceptors.response.use(
-      (response) => response,
-      (error: AxiosError) => {
-        if (error.response) {
-          // Server responded with error status
-          const status = error.response.status;
-          const data = error.response.data as any;
-          
-          if (status === 404) {
-            throw new Error(`Resource not found: ${error.config?.url}`);
-          } else if (status === 400) {
-            throw new Error(`Bad request: ${data?.error || error.message}`);
-          } else if (status === 500) {
-            throw new Error(`Server error: ${data?.error || 'Internal server error'}`);
-          } else if (status === 429) {
-            throw new Error('Rate limit exceeded. Please try again later.');
-          }
-          
-          throw new Error(data?.error || `API error (${status})`);
-        } else if (error.request) {
-          // Request made but no response
-          throw new Error('CapCut API server is not responding. Please ensure the server is running.');
-        } else {
-          // Error setting up request
-          throw new Error(`Request error: ${error.message}`);
-        }
-      }
-    );
-  }
-
-  async request<T>(
-    endpoint: string,
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'POST',
-    data?: any,
-    params?: Record<string, any>
-  ): Promise<ApiResponse<T>> {
-    try {
-      const config: AxiosRequestConfig = {
-        method,
-        url: endpoint,
-        ...(data && { data }),
-        ...(params && { params }),
-      };
-
-      const response = await this.client.request<ApiResponse<T>>(config);
-      return response.data;
-    } catch (error) {
-      if (error instanceof Error) {
-        return {
-          success: false,
-          error: error.message
-        };
-      }
-      return {
-        success: false,
-        error: 'Unknown error occurred'
-      };
-    }
-  }
-
-  // Specific API methods
-  async createDraft(config: { width: number; height: number; fps?: number }) {
-    return this.request('/create_draft', 'POST', config);
-  }
-
-  async addVideo(data: any) {
-    return this.request('/add_video', 'POST', data);
-  }
-
-  async addAudio(data: any) {
-    return this.request('/add_audio', 'POST', data);
-  }
-
-  async addText(data: any) {
-    return this.request('/add_text', 'POST', data);
-  }
-
-  async addImage(data: any) {
-    return this.request('/add_image', 'POST', data);
-  }
-
-  async addSubtitle(data: any) {
-    return this.request('/add_subtitle', 'POST', data);
-  }
-
-  async addKeyframe(data: any) {
-    return this.request('/add_keyframe', 'POST', data);
-  }
-
-  async addEffect(data: any) {
-    return this.request('/add_effect', 'POST', data);
-  }
-
-  async addSticker(data: any) {
-    return this.request('/add_sticker', 'POST', data);
-  }
-
-  async saveDraft(draftId: string) {
-    return this.request('/save_draft', 'POST', { draft_id: draftId });
-  }
-
-  async getDuration(url: string) {
-    return this.request('/get_duration', 'POST', { url });
+export class BackendError extends Error {
+  readonly status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'BackendError';
+    this.status = status;
   }
 }
 
-// Singleton instance
-export const apiClient = new CapCutApiClient();
+/** The envelope every VectCutAPI route returns. */
+interface BackendEnvelope {
+  success?: boolean;
+  output?: unknown;
+  error?: unknown;
+}
+
+export interface ApiClientOptions {
+  baseUrl: string;
+  timeoutMs: number;
+  fetchImpl?: typeof fetch;
+}
+
+/** Endpoints this fork is allowed to call, verified against capcut_server.py. */
+export const BACKEND_ENDPOINTS = {
+  createDraft: '/create_draft',
+  addVideo: '/add_video',
+  addAudio: '/add_audio',
+  addText: '/add_text',
+  addImage: '/add_image',
+  addSubtitle: '/add_subtitle',
+  /** Not /add_keyframe: that route does not exist. */
+  addKeyframe: '/add_video_keyframe',
+  addEffect: '/add_effect',
+  addSticker: '/add_sticker',
+  saveDraft: '/save_draft',
+  queryDraftStatus: '/query_draft_status',
+  listIntroAnimations: '/get_intro_animation_types',
+  listOutroAnimations: '/get_outro_animation_types',
+  listComboAnimations: '/get_combo_animation_types',
+  listTransitions: '/get_transition_types',
+  listMasks: '/get_mask_types',
+  listAudioEffects: '/get_audio_effect_types',
+  listFonts: '/get_font_types',
+  listTextIntro: '/get_text_intro_types',
+  listTextOutro: '/get_text_outro_types',
+  listTextLoop: '/get_text_loop_anim_types',
+  listSceneEffects: '/get_video_scene_effect_types',
+  listCharacterEffects: '/get_video_character_effect_types',
+} as const;
+
+export type BackendEndpoint = (typeof BACKEND_ENDPOINTS)[keyof typeof BACKEND_ENDPOINTS];
+
+export class CapCutApiClient {
+  private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: ApiClientOptions) {
+    // Re-validate at construction: this class is the only thing that opens a
+    // socket, so it is the last place a non-loopback target could slip in.
+    this.baseUrl = assertLoopbackBackendUrl(options.baseUrl);
+    if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+      throw new ConfigError('The backend request timeout must be a positive number of milliseconds');
+    }
+    this.timeoutMs = options.timeoutMs;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  /**
+   * POST a JSON body to a known endpoint and unwrap the envelope.
+   *
+   * @returns the `output` payload on success.
+   * @throws {BackendError} with the backend's own message on failure.
+   */
+  async post<T = unknown>(endpoint: BackendEndpoint, body: Record<string, unknown>): Promise<T> {
+    return this.send<T>(endpoint, 'POST', body);
+  }
+
+  /** GET a known endpoint and unwrap the envelope. */
+  async get<T = unknown>(endpoint: BackendEndpoint): Promise<T> {
+    return this.send<T>(endpoint, 'GET');
+  }
+
+  private async send<T>(
+    endpoint: BackendEndpoint,
+    method: 'GET' | 'POST',
+    body?: Record<string, unknown>
+  ): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method,
+        redirect: 'error',
+        signal: controller.signal,
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new BackendError(
+          `VectCutAPI did not respond within ${this.timeoutMs}ms (${method} ${endpoint})`
+        );
+      }
+      throw new BackendError(
+        `Could not reach VectCutAPI at ${this.baseUrl} (${method} ${endpoint}). ` +
+          'Start it with: python capcut_server.py --host 127.0.0.1'
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      throw new BackendError(
+        `VectCutAPI returned HTTP ${response.status} for ${method} ${endpoint}`,
+        response.status
+      );
+    }
+
+    let envelope: BackendEnvelope;
+    try {
+      envelope = (await response.json()) as BackendEnvelope;
+    } catch {
+      throw new BackendError(`VectCutAPI returned a non-JSON body for ${method} ${endpoint}`);
+    }
+
+    if (envelope.success !== true) {
+      const detail =
+        typeof envelope.error === 'string' && envelope.error.trim() !== ''
+          ? envelope.error.trim()
+          : 'the backend reported failure without a message';
+      throw new BackendError(`${method} ${endpoint} failed: ${detail}`);
+    }
+
+    return envelope.output as T;
+  }
+
+  /** The loopback origin this client is pinned to. */
+  get origin(): string {
+    return this.baseUrl;
+  }
+}

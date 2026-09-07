@@ -1,51 +1,30 @@
-// Shared constants for CapCut MCP Server
+// Shared constants for the CapCut MCP server.
 
-export const API_BASE_URL = process.env.CAPCUT_API_URL || 'http://localhost:9001';
-export const CHARACTER_LIMIT = 15000;
-export const DEFAULT_FPS = 30;
-export const DEFAULT_VIDEO_RESOLUTION = {
-  width: 1920,
-  height: 1080
-};
+/** Cap on the size of a single tool response, to keep transcripts bounded. */
+export const CHARACTER_LIMIT = 15_000;
 
-export const SUPPORTED_VIDEO_FORMATS = [
-  'mp4', 'mov', 'avi', 'mkv', 'webm', 'flv'
-];
+/** Canvas defaults, matching VectCutAPI's own defaults. */
+export const DEFAULT_CANVAS = { width: 1080, height: 1920 } as const;
 
-export const SUPPORTED_AUDIO_FORMATS = [
-  'mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg'
-];
+/**
+ * Asset catalogues VectCutAPI exposes over GET. Exposing one discovery tool
+ * over this map is what lets the editing tools take free-form CapCut asset
+ * names (effects, transitions, fonts, animations) without either hard-coding
+ * hundreds of enum members or guessing at names that do not exist.
+ */
+export const ASSET_CATALOGUES = {
+  intro_animation: '/get_intro_animation_types',
+  outro_animation: '/get_outro_animation_types',
+  combo_animation: '/get_combo_animation_types',
+  transition: '/get_transition_types',
+  mask: '/get_mask_types',
+  audio_effect: '/get_audio_effect_types',
+  font: '/get_font_types',
+  text_intro: '/get_text_intro_types',
+  text_outro: '/get_text_outro_types',
+  text_loop: '/get_text_loop_anim_types',
+  video_scene_effect: '/get_video_scene_effect_types',
+  video_character_effect: '/get_video_character_effect_types',
+} as const;
 
-export const SUPPORTED_IMAGE_FORMATS = [
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'
-];
-
-export const TRANSITIONS = [
-  'fade_in',
-  'fade_out',
-  'dissolve',
-  'wipe',
-  'slide',
-  'zoom'
-];
-
-export const TEXT_ANIMATIONS = [
-  'fade_in',
-  'slide_up',
-  'slide_down',
-  'slide_left',
-  'slide_right',
-  'zoom_in',
-  'bounce'
-];
-
-export const AVAILABLE_EFFECTS = [
-  'blur',
-  'sharpen',
-  'brightness',
-  'contrast',
-  'saturation',
-  'vignette',
-  'grain',
-  'glitch'
-];
+export type AssetCatalogue = keyof typeof ASSET_CATALOGUES;

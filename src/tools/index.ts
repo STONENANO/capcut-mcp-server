@@ -1,602 +1,572 @@
-// Tool registration and implementation for CapCut MCP server
+/**
+ * MCP tool registration.
+ *
+ * Every tool here maps 1:1 onto a VectCutAPI route that actually exists, with
+ * the parameter names that route actually reads. Media references pass through
+ * the SSRF guard, local paths through the containment guard, and the one tool
+ * that writes to the user's CapCut project folder takes a backup first.
+ *
+ * There is deliberately no tool that runs a command, evaluates code, reads an
+ * arbitrary file, or lets the caller choose a backend host.
+ */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { apiClient } from '../services/api-client.js';
-import { ResponseFormat } from '../types.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ServerConfig } from '../config.js';
+import { ASSET_CATALOGUES, CHARACTER_LIMIT, type AssetCatalogue } from '../constants.js';
 import {
-  CreateDraftSchema,
-  AddVideoSchema,
   AddAudioSchema,
-  AddTextSchema,
-  AddImageSchema,
-  AddSubtitleSchema,
-  AddKeyframeSchema,
   AddEffectSchema,
+  AddImageSchema,
+  AddKeyframeSchema,
   AddStickerSchema,
+  AddSubtitleSchema,
+  AddTextSchema,
+  AddVideoSchema,
+  CreateDraftSchema,
+  ListAssetTypesSchema,
+  RestoreBackupSchema,
   SaveDraftSchema,
-  GetDurationSchema,
-  type CreateDraftInput,
-  type AddVideoInput,
   type AddAudioInput,
-  type AddTextInput,
-  type AddImageInput,
-  type AddSubtitleInput,
-  type AddKeyframeInput,
   type AddEffectInput,
+  type AddImageInput,
+  type AddKeyframeInput,
   type AddStickerInput,
+  type AddSubtitleInput,
+  type AddTextInput,
+  type AddVideoInput,
+  type CreateDraftInput,
+  type ListAssetTypesInput,
+  type RestoreBackupInput,
   type SaveDraftInput,
-  type GetDurationInput
 } from '../schemas/index.js';
+import {
+  BACKEND_ENDPOINTS,
+  type BackendEndpoint,
+  type CapCutApiClient,
+} from '../services/api-client.js';
+import { createBackup, listBackups, resolveProjectDir, restoreBackup } from '../services/backup.js';
+import {
+  validateMediaReference,
+  type MediaGuardOptions,
+} from '../security/media-url.js';
+import { ToolKind, type ResponseFormat } from '../types.js';
 
-// Utility function to format responses
-function formatResponse(data: any, format: ResponseFormat): {
-  content: Array<{ type: "text"; text: string }>;
-  structuredContent?: any;
-} {
-  if (format === ResponseFormat.JSON) {
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
-  } else {
-    // Markdown format
-    let markdown = '';
-    if (data.draft_id) {
-      markdown += `## Draft Created\n\n`;
-      markdown += `- **Draft ID**: \`${data.draft_id}\`\n`;
-      markdown += `- **Dimensions**: ${data.width}x${data.height}\n`;
-      markdown += `- **FPS**: ${data.fps}\n`;
-    } else if (data.duration !== undefined) {
-      markdown += `## Media Duration\n\n`;
-      markdown += `- **Duration**: ${data.duration.toFixed(2)}s\n`;
-      if (data.format) markdown += `- **Format**: ${data.format}\n`;
-      if (data.width) markdown += `- **Resolution**: ${data.width}x${data.height}\n`;
-    } else if (data.draft_url) {
-      markdown += `## Draft Saved\n\n`;
-      markdown += `Draft saved successfully at:\n\`${data.draft_url}\`\n\n`;
-      markdown += `Copy this folder to your CapCut drafts directory to open it in the application.\n`;
-    } else {
-      markdown += `## Operation Successful\n\n`;
-      markdown += JSON.stringify(data, null, 2);
-    }
-    return {
-      content: [{ type: "text" as const, text: markdown }],
-      structuredContent: data
-    };
-  }
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+export interface ToolContext {
+  client: CapCutApiClient;
+  config: ServerConfig;
 }
 
-function handleError(error: unknown): {
-  content: Array<{ type: "text"; text: string }>;
-} {
-  const message = error instanceof Error ? error.message : 'Unknown error occurred';
+// --------------------------------------------------------------------------
+// Result shaping
+// --------------------------------------------------------------------------
+
+function truncate(text: string): string {
+  return text.length <= CHARACTER_LIMIT
+    ? text
+    : `${text.slice(0, CHARACTER_LIMIT)}\n\n[truncated at ${CHARACTER_LIMIT} characters]`;
+}
+
+function ok(
+  summary: string,
+  payload: unknown,
+  format: ResponseFormat
+): ToolResult {
+  const structured =
+    payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : { output: payload };
+
+  const text =
+    format === 'json'
+      ? JSON.stringify(payload, null, 2)
+      : `${summary}\n\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+
+  return { content: [{ type: 'text', text: truncate(text) }], structuredContent: structured };
+}
+
+/**
+ * Turn a thrown error into a tool result.
+ *
+ * Only the error's own message is surfaced. Stack traces, the environment, and
+ * request bodies are deliberately not included: the message is written to be
+ * actionable on its own, and everything else risks leaking local paths or
+ * project content into the transcript.
+ */
+function fail(error: unknown): ToolResult {
+  const message =
+    error instanceof Error && error.message ? error.message : 'The operation failed';
+  return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
+}
+
+/** Drop keys the backend does not read, and any `undefined` from optional fields. */
+function backendBody(input: Record<string, unknown>): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (key === 'response_format' || value === undefined) continue;
+    body[key] = value;
+  }
+  return body;
+}
+
+// --------------------------------------------------------------------------
+// Guards
+// --------------------------------------------------------------------------
+
+function mediaGuardOptions(config: ServerConfig): MediaGuardOptions {
   return {
-    content: [{
-      type: "text" as const,
-      text: `Error: ${message}\n\nPlease check that:\n- The CapCut API server is running\n- All required parameters are valid\n- Media URLs are accessible`
-    }]
+    approvedMediaDirs: config.mediaDirs,
+    maxDownloadBytes: config.maxDownloadBytes,
+    requestTimeoutMs: config.requestTimeoutMs,
+    preflight: config.mediaPreflight,
+    maxRedirects: config.maxRedirects,
   };
 }
 
-export function registerTools(server: McpServer): void {
-  // Tool 1: Create Draft
+/** Validate one media reference and return the value to send to the backend. */
+async function guardMedia(value: string, config: ServerConfig): Promise<string> {
+  const reference = await validateMediaReference(value, mediaGuardOptions(config));
+  return reference.value;
+}
+
+/** Inline SRT text is recognised by its cue arrow, and needs no network check. */
+function isInlineSrt(value: string): boolean {
+  return value.includes('-->') && /\r?\n/.test(value);
+}
+
+function requireDraftDir(config: ServerConfig): string {
+  if (!config.draftDir) {
+    throw new Error(
+      'CAPCUT_DRAFT_DIR is not set, so this server cannot locate (or back up) your CapCut ' +
+        'projects. Point it at your CapCut "Draft Content" directory and restart the server.'
+    );
+  }
+  return config.draftDir;
+}
+
+// --------------------------------------------------------------------------
+// Registration
+// --------------------------------------------------------------------------
+
+const MUTATING_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+const READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Prefix every description with its read/write classification. */
+function describe(kind: ToolKind, body: string): string {
+  return `[${kind}] ${body.trim()}`;
+}
+
+export function registerTools(server: McpServer, context: ToolContext): void {
+  const { client, config } = context;
+
+  /** Shared shape for the simple "validate, forward, report" tools. */
+  const forward = async <T extends { response_format: ResponseFormat }>(
+    endpoint: BackendEndpoint,
+    input: T,
+    summary: string,
+    transform?: (input: T) => Promise<Record<string, unknown>> | Record<string, unknown>
+  ): Promise<ToolResult> => {
+    try {
+      const body = transform ? await transform(input) : backendBody(input);
+      const output = await client.post(endpoint, body);
+      return ok(summary, output, input.response_format);
+    } catch (error) {
+      return fail(error);
+    }
+  };
+
+  // ---- 1. Create draft (MUTATING: allocates a new draft) -------------------
   server.registerTool(
     'capcut_create_draft',
     {
       title: 'Create CapCut Draft',
-      description: `Create a new video editing draft with specified dimensions and frame rate.
+      description: describe(
+        ToolKind.MUTATING,
+        `Create a new, empty CapCut draft and return its draft_id.
 
-This tool initializes a new draft project that can be edited by adding videos, audio, text, images, and effects.
+Creates in-memory state on the local VectCutAPI; nothing is written to your CapCut
+projects folder until capcut_save_draft is called.
 
-Args:
-  - width (number): Video width in pixels (360-4096, default: 1920)
-  - height (number): Video height in pixels (360-4096, default: 1080)
-  - fps (number): Frames per second (24-120, default: 30)
-  - response_format ('markdown' | 'json'): Output format (default: 'markdown')
+Note: VectCutAPI derives frame rate from the source media, so there is no fps
+parameter. Only the canvas size is set here.
 
-Returns:
-  {
-    "draft_id": string,      // Unique draft identifier for subsequent operations
-    "width": number,         // Video width
-    "height": number,        // Video height
-    "fps": number,           // Frame rate
-    "duration": number,      // Current duration (starts at 0)
-    "created_at": string     // ISO timestamp
-  }
-
-Examples:
-  - Create HD draft: params with width=1920, height=1080
-  - Create vertical video: params with width=1080, height=1920
-  - Create 4K draft: params with width=3840, height=2160`,
+Returns: { "draft_id": string, "draft_url": string }`
+      ),
       inputSchema: CreateDraftSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: CreateDraftInput) => {
-      try {
-        const response = await apiClient.createDraft({
-          width: params.width,
-          height: params.height,
-          fps: params.fps
-        });
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to create draft');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: CreateDraftInput) =>
+      forward(BACKEND_ENDPOINTS.createDraft, input, '## Draft created')
   );
 
-  // Tool 2: Add Video
+  // ---- 2. Add video -------------------------------------------------------
   server.registerTool(
     'capcut_add_video',
     {
       title: 'Add Video to Draft',
-      description: `Add a video clip to an existing draft with timing, volume, and effects.
+      description: describe(
+        ToolKind.MUTATING,
+        `Add a video clip to a draft's timeline.
 
-This tool adds video content to the timeline with support for transitions, speed adjustments, and volume control.
+'start'/'end' trim the SOURCE clip; 'target_start' is where it lands on the
+timeline. Set end=0 to use the clip to its end.
 
-Args:
-  - draft_id (string): The draft ID from create_draft
-  - video_url (string): URL to video file (mp4, mov, avi, mkv, webm, flv)
-  - start (number): Start time in seconds (>= 0)
-  - end (number): End time in seconds (> 0)
-  - volume (number): Audio volume 0.0-1.0 (default: 1.0)
-  - transition (string): Optional transition effect (fade_in, fade_out, dissolve, wipe, slide, zoom)
-  - speed (number): Playback speed 0.1-10x (default: 1.0)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Add background video: draft_id="abc123", video_url="https://...", start=0, end=10
-  - Add with slow motion: speed=0.5
-  - Add with fade in: transition="fade_in"`,
+video_url must be an https:// URL or an absolute path inside an approved media
+directory (CAPCUT_MEDIA_DIRS). Private, loopback and metadata destinations are
+rejected before the backend ever fetches it.`
+      ),
       inputSchema: AddVideoSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddVideoInput) => {
-      try {
-        const response = await apiClient.addVideo(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add video');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddVideoInput) =>
+      forward(BACKEND_ENDPOINTS.addVideo, input, '## Video added', async raw => ({
+        ...backendBody(raw),
+        video_url: await guardMedia(raw.video_url, config),
+      }))
   );
 
-  // Tool 3: Add Audio
+  // ---- 3. Add audio -------------------------------------------------------
   server.registerTool(
     'capcut_add_audio',
     {
       title: 'Add Audio to Draft',
-      description: `Add audio track to draft with volume and fade effects.
+      description: describe(
+        ToolKind.MUTATING,
+        `Add an audio track to a draft's timeline.
 
-This tool adds background music or sound effects to the video timeline.
+'start'/'end' trim the SOURCE audio; 'target_start' is the timeline position.
 
-Args:
-  - draft_id (string): The draft ID
-  - audio_url (string): URL to audio file (mp3, wav, aac, m4a, flac, ogg)
-  - start (number): Start time in seconds
-  - end (number): End time in seconds
-  - volume (number): Audio volume 0.0-1.0 (default: 1.0)
-  - fade_in (number): Fade in duration in seconds (default: 0)
-  - fade_out (number): Fade out duration in seconds (default: 0)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Add background music: audio_url="https://...", volume=0.5
-  - Add with fade: fade_in=2, fade_out=2`,
+Note: VectCutAPI's /add_audio has no fade-in/fade-out parameters, so none are
+offered here. Use capcut_add_keyframe on the 'volume' property to ramp levels.`
+      ),
       inputSchema: AddAudioSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddAudioInput) => {
-      try {
-        const response = await apiClient.addAudio(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add audio');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddAudioInput) =>
+      forward(BACKEND_ENDPOINTS.addAudio, input, '## Audio added', async raw => ({
+        ...backendBody(raw),
+        audio_url: await guardMedia(raw.audio_url, config),
+      }))
   );
 
-  // Tool 4: Add Text
+  // ---- 4. Add text --------------------------------------------------------
   server.registerTool(
     'capcut_add_text',
     {
-      title: 'Add Text to Draft',
-      description: `Add styled text overlay to video with positioning, colors, shadows, and animations.
+      title: 'Add Text Overlay',
+      description: describe(
+        ToolKind.MUTATING,
+        `Add a styled text overlay to a draft.
 
-This tool creates text elements with full styling control including fonts, colors, backgrounds, shadows, and animations.
+Position uses CapCut's normalised canvas coordinates via transform_x/transform_y
+(0,0 is centre; roughly -1..1 spans the canvas) -- not 0..1 pixel fractions.
 
-Args:
-  - draft_id (string): The draft ID
-  - text (string): Text content to display (1-500 characters)
-  - start (number): Start time in seconds
-  - end (number): End time in seconds
-  - font (string): Font family name (optional)
-  - font_size (number): Font size 12-200 (default: 48)
-  - font_color (string): Hex color e.g., #FFFFFF (default: #FFFFFF)
-  - background_color (string): Background hex color (optional)
-  - background_alpha (number): Background opacity 0.0-1.0 (default: 0.8)
-  - shadow_enabled (boolean): Enable shadow (default: false)
-  - shadow_color (string): Shadow hex color (default: #000000)
-  - position_x (number): Horizontal position 0.0-1.0 (default: 0.5 center)
-  - position_y (number): Vertical position 0.0-1.0 (default: 0.5 center)
-  - animation (string): Animation effect (fade_in, slide_up, slide_down, slide_left, slide_right, zoom_in, bounce)
-  - response_format ('markdown' | 'json'): Output format
+font_size is CapCut's own scale (about 1-100, default 8), not points.
 
-Examples:
-  - Add title: text="Welcome", font_size=72, position_y=0.2, animation="fade_in"
-  - Add subtitle: text="Subscribe!", font_size=36, background_color="#000000"`,
+A background is only drawn when background_alpha > 0. Animation names come from
+capcut_list_asset_types(category="text_intro" / "text_outro").`
+      ),
       inputSchema: AddTextSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddTextInput) => {
-      try {
-        const response = await apiClient.addText(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add text');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddTextInput) => forward(BACKEND_ENDPOINTS.addText, input, '## Text added')
   );
 
-  // Tool 5: Add Image
+  // ---- 5. Add image -------------------------------------------------------
   server.registerTool(
     'capcut_add_image',
     {
-      title: 'Add Image to Draft',
-      description: `Add image overlay to video with positioning, scaling, rotation, and animation.
+      title: 'Add Image Overlay',
+      description: describe(
+        ToolKind.MUTATING,
+        `Add an image overlay to a draft.
 
-This tool adds static or animated images to the video timeline.
+Position uses transform_x/transform_y and size uses scale_x/scale_y, matching
+CapCut's own model. VectCutAPI's /add_image has no rotation parameter, so none is
+offered; use capcut_add_keyframe on 'rotation' instead.
 
-Args:
-  - draft_id (string): The draft ID
-  - image_url (string): URL to image file (jpg, jpeg, png, gif, webp, bmp)
-  - start (number): Start time in seconds
-  - end (number): End time in seconds
-  - position_x (number): Horizontal position 0.0-1.0 (default: 0.5)
-  - position_y (number): Vertical position 0.0-1.0 (default: 0.5)
-  - scale (number): Scale multiplier 0.1-5.0 (default: 1.0)
-  - rotation (number): Rotation angle 0-360 degrees (default: 0)
-  - animation (string): Animation effect (optional)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Add logo: image_url="https://...", position_x=0.9, position_y=0.1, scale=0.3
-  - Add rotating image: rotation=45, animation="zoom_in"`,
+image_url is validated exactly like video_url.`
+      ),
       inputSchema: AddImageSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddImageInput) => {
-      try {
-        const response = await apiClient.addImage(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add image');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddImageInput) =>
+      forward(BACKEND_ENDPOINTS.addImage, input, '## Image added', async raw => ({
+        ...backendBody(raw),
+        image_url: await guardMedia(raw.image_url, config),
+      }))
   );
 
-  // Tool 6: Add Subtitle
+  // ---- 6. Add subtitle ----------------------------------------------------
   server.registerTool(
     'capcut_add_subtitle',
     {
-      title: 'Add Subtitles to Draft',
-      description: `Add subtitles from SRT file content with styling options.
+      title: 'Add Subtitles',
+      description: describe(
+        ToolKind.MUTATING,
+        `Add SRT subtitles to a draft.
 
-This tool imports subtitles in SRT format and applies styling.
+The 'srt' field takes inline SRT text (preferred), an https:// URL, or an
+absolute path inside an approved media directory. URLs and paths are validated
+before the backend fetches them.
 
-Args:
-  - draft_id (string): The draft ID
-  - srt_content (string): SRT formatted subtitle content
-  - font (string): Font family name (optional)
-  - font_size (number): Font size 12-100 (default: 36)
-  - font_color (string): Hex color (default: #FFFFFF)
-  - background_enabled (boolean): Enable background (default: true)
-  - background_color (string): Background hex color (default: #000000)
-  - response_format ('markdown' | 'json'): Output format
-
-Example SRT format:
-  1
-  00:00:01,000 --> 00:00:03,000
-  Welcome to my video
-
-  2
-  00:00:03,500 --> 00:00:05,000
-  Subscribe for more content`,
+A background is only drawn when background_alpha > 0.`
+      ),
       inputSchema: AddSubtitleSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddSubtitleInput) => {
-      try {
-        const response = await apiClient.addSubtitle(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add subtitle');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddSubtitleInput) =>
+      forward(BACKEND_ENDPOINTS.addSubtitle, input, '## Subtitles added', async raw => ({
+        ...backendBody(raw),
+        // The backend field is `srt`, not `srt_content`.
+        srt: isInlineSrt(raw.srt) ? raw.srt : await guardMedia(raw.srt, config),
+      }))
   );
 
-  // Tool 7: Add Keyframe
+  // ---- 7. Add keyframes ---------------------------------------------------
   server.registerTool(
     'capcut_add_keyframe',
     {
       title: 'Add Keyframe Animation',
-      description: `Add keyframe-based property animation to tracks.
+      description: describe(
+        ToolKind.MUTATING,
+        `Animate track properties with keyframes.
 
-This tool creates smooth animations by interpolating between keyframe values.
+property_types, times and values are PARALLEL arrays -- one entry each per
+keyframe -- and must all be the same length. A property animated at two times
+appears twice. Targets VectCutAPI's /add_video_keyframe route.
 
-Args:
-  - draft_id (string): The draft ID
-  - track_name (string): Name of track to animate
-  - property_types (string[]): Properties to animate (scale_x, scale_y, alpha, rotation, position_x, position_y)
-  - times (number[]): Keyframe times in seconds (at least 2)
-  - values (string[]): Values for each keyframe (same length as times)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Fade in: property_types=["alpha"], times=[0, 2], values=["0.0", "1.0"]
-  - Zoom in: property_types=["scale_x", "scale_y"], times=[0, 2], values=["0.5", "1.5"]
-  - Rotate: property_types=["rotation"], times=[0, 3], values=["0", "360"]`,
+Example -- fade in over 2s:
+  property_types=["alpha", "alpha"], times=[0, 2], values=["0.0", "1.0"]`
+      ),
       inputSchema: AddKeyframeSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddKeyframeInput) => {
-      try {
-        const response = await apiClient.addKeyframe(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add keyframe');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
+    async (input: AddKeyframeInput) => {
+      // The backend enforces this too, but it reports the failure only after the
+      // draft has been touched; catching it here keeps the call a no-op.
+      const lengths = new Set([
+        input.property_types.length,
+        input.times.length,
+        input.values.length,
+      ]);
+      if (lengths.size !== 1) {
+        return fail(
+          new Error(
+            `property_types (${input.property_types.length}), times (${input.times.length}) and ` +
+              `values (${input.values.length}) must all have the same length: they are parallel ` +
+              'arrays of (property, time, value) triples, one entry per keyframe'
+          )
+        );
       }
+      return forward(BACKEND_ENDPOINTS.addKeyframe, input, '## Keyframes added');
     }
   );
 
-  // Tool 8: Add Effect
+  // ---- 8. Add effect ------------------------------------------------------
   server.registerTool(
     'capcut_add_effect',
     {
       title: 'Add Visual Effect',
-      description: `Apply visual effects to video segments.
+      description: describe(
+        ToolKind.MUTATING,
+        `Apply a CapCut visual effect over a time range.
 
-This tool adds effects like blur, sharpen, brightness adjustments, and more.
+'effect_type' must be an exact name from
+capcut_list_asset_types(category="video_scene_effect") or ("video_character_effect")
+-- CapCut matches these by enum name, so invented names such as "blur_filter" fail.
 
-Args:
-  - draft_id (string): The draft ID
-  - effect_name (string): Effect to apply (blur, sharpen, brightness, contrast, saturation, vignette, grain, glitch)
-  - start (number): Start time in seconds
-  - end (number): End time in seconds
-  - intensity (number): Effect intensity 0.0-1.0 (default: 0.5)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Add blur: effect_name="blur", intensity=0.7
-  - Increase brightness: effect_name="brightness", intensity=0.8
-  - Add vignette: effect_name="vignette", intensity=0.4`,
+'params' are the effect's own sliders, each 0-100.`
+      ),
       inputSchema: AddEffectSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddEffectInput) => {
-      try {
-        const response = await apiClient.addEffect(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add effect');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddEffectInput) => forward(BACKEND_ENDPOINTS.addEffect, input, '## Effect added')
   );
 
-  // Tool 9: Add Sticker
+  // ---- 9. Add sticker -----------------------------------------------------
   server.registerTool(
     'capcut_add_sticker',
     {
-      title: 'Add Sticker to Draft',
-      description: `Add sticker/emoji overlay with positioning and transformation.
+      title: 'Add Sticker',
+      description: describe(
+        ToolKind.MUTATING,
+        `Add a CapCut sticker to a draft.
 
-This tool adds decorative stickers or emojis to the video.
-
-Args:
-  - draft_id (string): The draft ID
-  - sticker_url (string): URL to sticker image
-  - start (number): Start time in seconds
-  - end (number): End time in seconds
-  - position_x (number): Horizontal position 0.0-1.0 (default: 0.5)
-  - position_y (number): Vertical position 0.0-1.0 (default: 0.5)
-  - scale (number): Scale multiplier 0.1-5.0 (default: 1.0)
-  - rotation (number): Rotation angle 0-360 degrees (default: 0)
-  - response_format ('markdown' | 'json'): Output format
-
-Examples:
-  - Add corner sticker: position_x=0.9, position_y=0.1, scale=0.2
-  - Add rotating emoji: rotation=15, scale=0.5`,
+Takes 'sticker_id' -- a CapCut sticker RESOURCE ID, not an image URL. VectCutAPI
+references stickers from CapCut's own library; to overlay your own artwork use
+capcut_add_image instead.`
+      ),
       inputSchema: AddStickerSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true
-      }
+      annotations: MUTATING_ANNOTATIONS,
     },
-    async (params: AddStickerInput) => {
-      try {
-        const response = await apiClient.addSticker(params);
-
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to add sticker');
-        }
-
-        return formatResponse(response.result, params.response_format);
-      } catch (error) {
-        return handleError(error);
-      }
-    }
+    async (input: AddStickerInput) =>
+      forward(BACKEND_ENDPOINTS.addSticker, input, '## Sticker added')
   );
 
-  // Tool 10: Save Draft
+  // ---- 10. Save draft (writes to the CapCut projects folder) --------------
   server.registerTool(
     'capcut_save_draft',
     {
-      title: 'Save Draft',
-      description: `Save the draft to a file that can be imported into CapCut.
+      title: 'Save Draft to CapCut',
+      description: describe(
+        ToolKind.MUTATING,
+        `Write the draft into your CapCut projects folder (CAPCUT_DRAFT_DIR).
 
-This tool finalizes the draft and generates a folder that can be copied to the CapCut drafts directory.
-
-Args:
-  - draft_id (string): The draft ID to save
-  - response_format ('markdown' | 'json'): Output format
-
-Returns:
-  {
-    "draft_url": string,    // Path to the saved draft folder
-    "status": "saved"
-  }
-
-The draft folder starts with "dfd_" and should be copied to:
-- Windows: C:\\Users\\<username>\\AppData\\Local\\CapCut\\User Data\\Projects\\Draft Content
-- macOS: ~/Library/Containers/com.lemon.lvpro/Data/Documents/JianyingPro/User Data/Projects/Draft Content`,
+This is the only tool that touches files CapCut itself reads. Before writing, the
+VectCutAPI DELETES the existing project directory and rebuilds it when it saves,
+so the whole project is snapshotted first to
+<draft dir>/.smartcut_backups/<draft id>/<timestamp>/ -- outside the project, so
+the save cannot destroy it. If that snapshot cannot be taken, the save is not
+attempted. Recover one with capcut_restore_backup. Snapshots within
+CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.`
+      ),
       inputSchema: SaveDraftSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false
-      }
+      annotations: { ...MUTATING_ANNOTATIONS, destructiveHint: true },
     },
-    async (params: SaveDraftInput) => {
+    async (input: SaveDraftInput) => {
       try {
-        const response = await apiClient.saveDraft(params.draft_id);
+        const draftDir = requireDraftDir(config);
+        const projectDir = await resolveProjectDir(input.draft_id, draftDir);
 
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to save draft');
-        }
+        // VectCutAPI deletes the existing project directory before rewriting
+        // it, so this snapshot -- taken outside the project -- is the only
+        // copy of the current state once the save begins. If it cannot be
+        // taken, the save does not happen.
+        const backup = await createBackup(projectDir, draftDir, input.draft_id, {
+          coalesceSeconds: config.backupCoalesceSeconds,
+          maxBytes: config.maxBackupBytes,
+        });
 
-        return formatResponse(response.result, params.response_format);
+        const output = await client.post(BACKEND_ENDPOINTS.saveDraft, {
+          draft_id: input.draft_id,
+          draft_folder: draftDir,
+        });
+
+        const payload = {
+          saved: output,
+          backup: backup.created
+            ? {
+                created: true,
+                version: backup.record?.version,
+                file_count: backup.record?.files.length,
+                bytes: backup.record?.bytes,
+              }
+            : { created: false, reason: backup.skippedReason },
+        };
+        const summary = backup.created
+          ? `## Draft saved\n\nBacked up to \`${backup.record?.version}\` before writing.`
+          : `## Draft saved\n\nNo new backup: ${backup.skippedReason}.`;
+        return ok(summary, payload, input.response_format);
       } catch (error) {
-        return handleError(error);
+        return fail(error);
       }
     }
   );
 
-  // Tool 11: Get Media Duration
+  // ---- 11. List asset catalogues (READ-ONLY) ------------------------------
   server.registerTool(
-    'capcut_get_duration',
+    'capcut_list_asset_types',
     {
-      title: 'Get Media Duration',
-      description: `Get duration and metadata of video or audio file.
+      title: 'List CapCut Asset Names',
+      description: describe(
+        ToolKind.READ_ONLY,
+        `List the exact asset names CapCut accepts for a given category.
 
-This tool analyzes media files to retrieve duration, format, and resolution information.
+Call this before capcut_add_effect, or before passing any transition, font or
+animation name -- CapCut matches these by exact name and rejects anything else.
 
-Args:
-  - url (string): URL to media file
-  - response_format ('markdown' | 'json'): Output format
-
-Returns:
-  {
-    "duration": number,     // Duration in seconds
-    "format": string,       // File format
-    "width": number,        // Video width (if video)
-    "height": number        // Video height (if video)
-  }
-
-Examples:
-  - Check video length before adding: url="https://example.com/video.mp4"
-  - Verify audio duration: url="https://example.com/music.mp3"`,
-      inputSchema: GetDurationSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true
-      }
+Categories: ${Object.keys(ASSET_CATALOGUES).join(', ')}`
+      ),
+      inputSchema: ListAssetTypesSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    async (params: GetDurationInput) => {
+    async (input: ListAssetTypesInput) => {
       try {
-        const response = await apiClient.getDuration(params.url);
+        const endpoint = ASSET_CATALOGUES[input.category as AssetCatalogue] as BackendEndpoint;
+        const output = await client.get(endpoint);
+        return ok(`## ${input.category} names`, output, input.response_format);
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
 
-        if (!response.success || !response.result) {
-          throw new Error(response.error || 'Failed to get duration');
+  // ---- 12. Restore a backup ----------------------------------------------
+  server.registerTool(
+    'capcut_restore_backup',
+    {
+      title: 'Restore CapCut Project Backup',
+      description: describe(
+        ToolKind.MUTATING,
+        `List or restore the automatic backups of a CapCut project.
+
+Omit 'version' to list available versions without changing anything. Supply a
+'version' to restore that snapshot's metadata over the project.
+
+Only backups belonging to the named project inside CAPCUT_DRAFT_DIR can be
+restored: there is no way to name an arbitrary source or destination path. The
+pre-restore state is itself snapshotted first, so a restore is undoable.`
+      ),
+      inputSchema: RestoreBackupSchema,
+      annotations: { ...MUTATING_ANNOTATIONS, destructiveHint: true },
+    },
+    async (input: RestoreBackupInput) => {
+      try {
+        const draftDir = requireDraftDir(config);
+        // Validates the draft id and its containment before anything else runs.
+        await resolveProjectDir(input.draft_id, draftDir);
+
+        if (!input.version) {
+          const records = await listBackups(draftDir, input.draft_id);
+          return ok(
+            records.length === 0
+              ? `## No backups\n\nNo snapshots exist yet for \`${input.draft_id}\`.`
+              : `## ${records.length} backup(s) for \`${input.draft_id}\``,
+            {
+              draft_id: input.draft_id,
+              versions: records.map(r => ({
+                version: r.version,
+                created_at: r.createdAt.toISOString(),
+                file_count: r.files.length,
+                bytes: r.bytes,
+              })),
+            },
+            input.response_format
+          );
         }
 
-        return formatResponse(response.result, params.response_format);
+        const result = await restoreBackup(draftDir, input.draft_id, input.version, {
+          maxBytes: config.maxBackupBytes,
+        });
+        return ok(
+          `## Restored \`${result.version}\``,
+          {
+            draft_id: input.draft_id,
+            restored_version: result.version,
+            restored_file_count: result.restoredFiles.length,
+            pre_restore_backup: result.safetyBackup?.version ?? null,
+          },
+          input.response_format
+        );
       } catch (error) {
-        return handleError(error);
+        return fail(error);
       }
     }
   );

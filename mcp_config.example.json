@@ -2,11 +2,11 @@
   "mcpServers": {
     "capcut": {
       "command": "node",
-      "args": [
-        "/absolute/path/to/capcut-mcp-server/dist/index.js"
-      ],
+      "args": ["/absolute/path/to/capcut-mcp-server/dist/index.js"],
       "env": {
-        "CAPCUT_API_URL": "http://localhost:9001"
+        "CAPCUT_API_URL": "http://127.0.0.1:9000",
+        "CAPCUT_DRAFT_DIR": "/Users/you/Movies/CapCut/User Data/Projects/com.lveditor.draft",
+        "CAPCUT_MEDIA_DIRS": "/Users/you/Movies/capcut-media"
       }
     }
   }

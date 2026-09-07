@@ -1,321 +1,348 @@
-// Zod validation schemas for CapCut MCP tools
+/**
+ * Zod schemas for every MCP tool input.
+ *
+ * Two rules run through this file:
+ *
+ *  1. Field names mirror VectCutAPI's actual request bodies. A field the
+ *     backend does not read is not offered, so a caller can never set something
+ *     that is silently dropped.
+ *  2. Every numeric is bounded and every object is `.strict()`. Unknown keys are
+ *     an error rather than something quietly forwarded to the backend.
+ */
 
 import { z } from 'zod';
-import { ResponseFormat } from '../types.js';
-import {
-  TRANSITIONS,
-  TEXT_ANIMATIONS,
-  AVAILABLE_EFFECTS
-} from '../constants.js';
+import { ASSET_CATALOGUES, DEFAULT_CANVAS } from '../constants.js';
 
-// Common schemas
-export const ResponseFormatSchema = z.nativeEnum(ResponseFormat)
-  .default(ResponseFormat.MARKDOWN)
-  .describe("Output format: 'markdown' for human-readable or 'json' for machine-readable");
+/** Output format for a tool result. */
+export const ResponseFormatSchema = z
+  .enum(['markdown', 'json'])
+  .default('markdown')
+  .describe("Output format: 'markdown' for a readable summary, 'json' for the raw backend payload");
 
-const UrlSchema = z.string()
-  .url('Must be a valid URL')
-  .describe('URL to the media file');
+/**
+ * A media reference: an https URL, or an absolute path inside a directory
+ * listed in CAPCUT_MEDIA_DIRS. Content is validated for real by the SSRF/path
+ * guards at call time; this only bounds the string.
+ */
+const MediaRefSchema = z
+  .string()
+  .min(1, 'A media reference is required')
+  .max(4096, 'Media reference is too long')
+  .refine(v => !v.includes('\0'), 'Media reference must not contain a NUL byte')
+  .describe(
+    'An https:// URL, or an absolute path to a file inside an approved media directory. ' +
+      'http://, file://, ftp:// and other schemes are rejected, as are private, loopback, ' +
+      'link-local and cloud-metadata destinations.'
+  );
 
-// Draft creation schema
-export const CreateDraftSchema = z.object({
-  width: z.number()
-    .int()
-    .min(360, 'Width must be at least 360')
-    .max(4096, 'Width must not exceed 4096')
-    .default(1920)
-    .describe('Video width in pixels'),
-  height: z.number()
-    .int()
-    .min(360, 'Height must be at least 360')
-    .max(4096, 'Height must not exceed 4096')
-    .default(1080)
-    .describe('Video height in pixels'),
-  fps: z.number()
-    .int()
-    .min(24, 'FPS must be at least 24')
-    .max(120, 'FPS must not exceed 120')
-    .default(30)
-    .describe('Frames per second'),
-  response_format: ResponseFormatSchema
-}).strict();
+const DraftIdSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
+    'Draft ID must be 1-128 characters of letters, digits, dot, dash or underscore'
+  )
+  .describe('The draft ID returned by capcut_create_draft');
 
-// Video track schema
-export const AddVideoSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add video to'),
-  video_url: UrlSchema,
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  volume: z.number()
-    .min(0, 'Volume must be between 0 and 1')
-    .max(1, 'Volume must be between 0 and 1')
-    .default(1.0)
-    .describe('Audio volume (0.0 to 1.0)'),
-  transition: z.enum(TRANSITIONS as [string, ...string[]])
-    .optional()
-    .describe('Transition effect to apply'),
-  speed: z.number()
-    .min(0.1, 'Speed must be at least 0.1x')
-    .max(10, 'Speed must not exceed 10x')
-    .default(1.0)
+const TrackNameSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'Track name must be 1-64 alphanumeric/._- characters')
+  .describe('Timeline track name; segments sharing a name land on the same track');
+
+/** CapCut asset names come from the backend catalogues and may be non-ASCII. */
+const AssetNameSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine(v => !/[\0\n\r]/.test(v), 'Asset name must not contain control characters')
+  .describe('Exact asset name from capcut_list_asset_types');
+
+const HexColorSchema = z
+  .string()
+  .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a 6-digit hex color such as #FFFFFF');
+
+const SecondsSchema = z.number().finite().min(0).max(86_400);
+const UnitIntervalSchema = z.number().finite().min(0).max(1);
+/** CapCut normalises canvas position to roughly -1..1; allow a little overscan. */
+const TransformSchema = z.number().finite().min(-10).max(10);
+const ScaleSchema = z.number().finite().min(0.01).max(20);
+
+const CanvasShape = {
+  width: z.number().int().min(360).max(4096).default(DEFAULT_CANVAS.width)
+    .describe('Canvas width in pixels'),
+  height: z.number().int().min(360).max(4096).default(DEFAULT_CANVAS.height)
+    .describe('Canvas height in pixels'),
+};
+
+const CommonShape = { response_format: ResponseFormatSchema };
+
+// --------------------------------------------------------------------------
+// Tool input shapes. Exported as raw shapes (what registerTool wants) plus a
+// strict ZodObject for standalone validation and tests.
+// --------------------------------------------------------------------------
+
+const CreateDraftShape = {
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const AddVideoShape = {
+  draft_id: DraftIdSchema,
+  video_url: MediaRefSchema,
+  start: SecondsSchema.default(0).describe('Trim start within the source clip, in seconds'),
+  end: SecondsSchema.default(0)
+    .describe('Trim end within the source clip, in seconds; 0 means "to the end of the clip"'),
+  target_start: SecondsSchema.default(0)
+    .describe('Where the clip is placed on the timeline, in seconds'),
+  duration: SecondsSchema.optional()
+    .describe('Override the source duration when the backend cannot probe it'),
+  speed: z.number().finite().min(0.1).max(10).default(1)
     .describe('Playback speed multiplier'),
-  response_format: ResponseFormatSchema
-}).strict();
+  volume: z.number().finite().min(0).max(2).default(1)
+    .describe('Audio volume; 1.0 is unchanged, 2.0 doubles the level'),
+  transform_x: TransformSchema.default(0).describe('Horizontal offset; 0 is centred'),
+  transform_y: TransformSchema.default(0).describe('Vertical offset; 0 is centred'),
+  scale_x: ScaleSchema.default(1).describe('Horizontal scale multiplier'),
+  scale_y: ScaleSchema.default(1).describe('Vertical scale multiplier'),
+  track_name: TrackNameSchema.default('video_main'),
+  relative_index: z.number().int().min(-100).max(100).default(0)
+    .describe('Render order among tracks; higher draws on top'),
+  transition: AssetNameSchema.optional()
+    .describe('Transition name from capcut_list_asset_types(category="transition")'),
+  transition_duration: z.number().finite().min(0).max(10).default(0.5)
+    .describe('Transition length in seconds'),
+  background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional()
+    .describe('Blurred-background strength: 1 light, 2 medium, 3 strong, 4 maximum'),
+  ...CanvasShape,
+  ...CommonShape,
+};
 
-// Audio track schema
-export const AddAudioSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add audio to'),
-  audio_url: UrlSchema,
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  volume: z.number()
-    .min(0, 'Volume must be between 0 and 1')
-    .max(1, 'Volume must be between 0 and 1')
-    .default(1.0)
-    .describe('Audio volume (0.0 to 1.0)'),
-  fade_in: z.number()
-    .min(0)
-    .default(0)
-    .describe('Fade in duration in seconds'),
-  fade_out: z.number()
-    .min(0)
-    .default(0)
-    .describe('Fade out duration in seconds'),
-  response_format: ResponseFormatSchema
-}).strict();
+const AddAudioShape = {
+  draft_id: DraftIdSchema,
+  audio_url: MediaRefSchema,
+  start: SecondsSchema.default(0).describe('Trim start within the source audio, in seconds'),
+  end: SecondsSchema.optional()
+    .describe('Trim end within the source audio, in seconds; omit for the whole file'),
+  target_start: SecondsSchema.default(0)
+    .describe('Where the audio is placed on the timeline, in seconds'),
+  duration: SecondsSchema.optional().describe('Override the source duration'),
+  speed: z.number().finite().min(0.1).max(10).default(1).describe('Playback speed multiplier'),
+  volume: z.number().finite().min(0).max(2).default(1).describe('Volume; 1.0 is unchanged'),
+  track_name: TrackNameSchema.default('audio_main'),
+  effect_type: AssetNameSchema.optional()
+    .describe('Audio effect from capcut_list_asset_types(category="audio_effect")'),
+  effect_params: z.array(z.number().finite().min(0).max(100)).max(16).optional()
+    .describe('Audio effect parameters, each 0-100'),
+  ...CanvasShape,
+  ...CommonShape,
+};
 
-// Text schema
-export const AddTextSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add text to'),
-  text: z.string()
-    .min(1, 'Text content is required')
-    .max(500, 'Text must not exceed 500 characters')
-    .describe('The text content to display'),
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  font: z.string()
+const AddTextShape = {
+  draft_id: DraftIdSchema,
+  text: z.string().min(1).max(2000).describe('Text content to display'),
+  start: SecondsSchema.describe('Timeline start, in seconds'),
+  end: SecondsSchema.describe('Timeline end, in seconds'),
+  font: AssetNameSchema.optional()
+    .describe('Font name from capcut_list_asset_types(category="font")'),
+  font_size: z.number().finite().min(1).max(100).default(8)
+    .describe("CapCut's own font scale (not points); 8 is the editor default"),
+  font_color: HexColorSchema.default('#FFFFFF'),
+  font_alpha: UnitIntervalSchema.default(1).describe('Text opacity'),
+  transform_x: TransformSchema.default(0).describe('Horizontal offset; 0 is centred'),
+  transform_y: TransformSchema.default(0).describe('Vertical offset; 0 is centred'),
+  vertical: z.boolean().default(false).describe('Render the text vertically'),
+  border_color: HexColorSchema.default('#000000'),
+  border_alpha: UnitIntervalSchema.default(1),
+  border_width: z.number().finite().min(0).max(100).default(0)
+    .describe('Outline width; 0 disables the outline'),
+  background_color: HexColorSchema.default('#000000'),
+  background_alpha: UnitIntervalSchema.default(0)
+    .describe('Background opacity; 0 means no background is drawn'),
+  background_style: z.number().int().min(0).max(2).default(0),
+  background_round_radius: UnitIntervalSchema.default(0),
+  shadow_enabled: z.boolean().default(false),
+  shadow_color: HexColorSchema.default('#000000'),
+  shadow_alpha: UnitIntervalSchema.default(0.9),
+  shadow_angle: z.number().finite().min(-180).max(180).default(-45),
+  shadow_distance: z.number().finite().min(0).max(100).default(5),
+  shadow_smoothing: UnitIntervalSchema.default(0.15),
+  intro_animation: AssetNameSchema.optional()
+    .describe('Entrance animation from capcut_list_asset_types(category="text_intro")'),
+  intro_duration: z.number().finite().min(0).max(10).default(0.5),
+  outro_animation: AssetNameSchema.optional()
+    .describe('Exit animation from capcut_list_asset_types(category="text_outro")'),
+  outro_duration: z.number().finite().min(0).max(10).default(0.5),
+  track_name: TrackNameSchema.default('text_main'),
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const AddImageShape = {
+  draft_id: DraftIdSchema,
+  image_url: MediaRefSchema,
+  start: SecondsSchema.default(0).describe('Timeline start, in seconds'),
+  end: SecondsSchema.default(3).describe('Timeline end, in seconds'),
+  transform_x: TransformSchema.default(0).describe('Horizontal offset; 0 is centred'),
+  transform_y: TransformSchema.default(0).describe('Vertical offset; 0 is centred'),
+  scale_x: ScaleSchema.default(1).describe('Horizontal scale multiplier'),
+  scale_y: ScaleSchema.default(1).describe('Vertical scale multiplier'),
+  track_name: TrackNameSchema.default('image_main'),
+  relative_index: z.number().int().min(-100).max(100).default(0),
+  intro_animation: AssetNameSchema.optional()
+    .describe('Entrance animation from capcut_list_asset_types(category="intro_animation")'),
+  intro_animation_duration: z.number().finite().min(0).max(10).default(0.5),
+  outro_animation: AssetNameSchema.optional()
+    .describe('Exit animation from capcut_list_asset_types(category="outro_animation")'),
+  outro_animation_duration: z.number().finite().min(0).max(10).default(0.5),
+  transition: AssetNameSchema.optional()
+    .describe('Transition from capcut_list_asset_types(category="transition")'),
+  transition_duration: z.number().finite().min(0).max(10).default(0.5),
+  background_blur: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const AddSubtitleShape = {
+  draft_id: DraftIdSchema,
+  srt: z
+    .string()
+    .min(1, 'Subtitle content or reference is required')
+    .max(1_000_000, 'Subtitle content is too large')
+    .describe(
+      'Inline SRT text, an https:// URL to an .srt file, or an absolute path inside an ' +
+        'approved media directory'
+    ),
+  time_offset: z.number().finite().min(-86_400).max(86_400).default(0)
+    .describe('Shift every cue by this many seconds'),
+  font: AssetNameSchema.optional(),
+  font_size: z.number().finite().min(1).max(100).default(5)
+    .describe("CapCut's own font scale (not points); 5 is the subtitle default"),
+  font_color: HexColorSchema.default('#FFFFFF'),
+  bold: z.boolean().default(false),
+  italic: z.boolean().default(false),
+  underline: z.boolean().default(false),
+  alpha: UnitIntervalSchema.default(1).describe('Text opacity'),
+  vertical: z.boolean().default(false),
+  border_color: HexColorSchema.default('#000000'),
+  border_alpha: UnitIntervalSchema.default(1),
+  border_width: z.number().finite().min(0).max(100).default(0),
+  background_color: HexColorSchema.default('#000000'),
+  background_alpha: UnitIntervalSchema.default(0)
+    .describe('Background opacity; 0 means no background is drawn'),
+  background_style: z.number().int().min(0).max(2).default(0),
+  transform_x: TransformSchema.default(0),
+  transform_y: TransformSchema.default(-0.8).describe('Vertical offset; -0.8 sits near the bottom'),
+  scale_x: ScaleSchema.default(1),
+  scale_y: ScaleSchema.default(1),
+  rotation: z.number().finite().min(-360).max(360).default(0),
+  track_name: TrackNameSchema.default('subtitle'),
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const AddKeyframeShape = {
+  draft_id: DraftIdSchema,
+  track_name: TrackNameSchema.default('video_main'),
+  // VectCutAPI requires len(property_types) == len(times) == len(values): these
+  // are parallel arrays of (property, time, value) triples, NOT a cross-product
+  // of properties over times. Animating one property at two times therefore
+  // needs that property repeated twice.
+  property_types: z
+    .array(
+      z.enum([
+        'position_x', 'position_y', 'rotation', 'scale_x', 'scale_y',
+        'uniform_scale', 'alpha', 'saturation', 'contrast', 'brightness', 'volume',
+      ])
+    )
+    .min(2)
+    .max(256)
+    .describe('Property animated by each keyframe; one entry per keyframe'),
+  times: z.array(SecondsSchema).min(2).max(256)
+    .describe('Time of each keyframe in seconds; one entry per keyframe'),
+  values: z.array(z.string().min(1).max(64).regex(/^-?\d+(\.\d+)?$/, 'Each value must be numeric'))
+    .min(2)
+    .max(256)
+    .describe('Value at each keyframe, as numeric strings; one entry per keyframe'),
+  ...CommonShape,
+};
+
+const AddEffectShape = {
+  draft_id: DraftIdSchema,
+  effect_type: AssetNameSchema.describe(
+    'Effect name from capcut_list_asset_types(category="video_scene_effect" or "video_character_effect")'
+  ),
+  effect_category: z.enum(['scene', 'character']).default('scene'),
+  start: SecondsSchema.default(0).describe('Timeline start, in seconds'),
+  end: SecondsSchema.default(3).describe('Timeline end, in seconds'),
+  // VectCutAPI reverses this list unconditionally (`params[::-1]`), so sending
+  // no value at all makes the backend raise. Default to an empty list, which it
+  // handles correctly and which means "use every effect default".
+  params: z.array(z.number().finite().min(0).max(100)).max(16).default([])
+    .describe('Effect parameters, each 0-100; an empty list uses the effect defaults'),
+  track_name: TrackNameSchema.default('effect_01'),
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const AddStickerShape = {
+  draft_id: DraftIdSchema,
+  sticker_id: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{4,64}$/, 'Sticker ID must be 4-64 characters of letters, digits, - or _')
+    .describe("CapCut sticker resource ID (not a URL); found in CapCut's own sticker metadata"),
+  start: SecondsSchema.default(0).describe('Timeline start, in seconds'),
+  end: SecondsSchema.default(5).describe('Timeline end, in seconds'),
+  transform_x: TransformSchema.default(0),
+  transform_y: TransformSchema.default(0),
+  scale_x: ScaleSchema.default(1),
+  scale_y: ScaleSchema.default(1),
+  rotation: z.number().finite().min(-360).max(360).default(0),
+  alpha: UnitIntervalSchema.default(1),
+  flip_horizontal: z.boolean().default(false),
+  flip_vertical: z.boolean().default(false),
+  track_name: TrackNameSchema.default('sticker_main'),
+  relative_index: z.number().int().min(-100).max(100).default(0),
+  ...CanvasShape,
+  ...CommonShape,
+};
+
+const SaveDraftShape = {
+  draft_id: DraftIdSchema,
+  ...CommonShape,
+};
+
+const ListAssetTypesShape = {
+  category: z.enum(Object.keys(ASSET_CATALOGUES) as [string, ...string[]])
+    .describe('Which CapCut asset catalogue to list'),
+  ...CommonShape,
+};
+
+const RestoreBackupShape = {
+  draft_id: DraftIdSchema,
+  version: z
+    .string()
+    .regex(
+      /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(_\d+)?$/,
+      'Version must look like 2026-09-07_14-31-05'
+    )
     .optional()
-    .describe('Font family name'),
-  font_size: z.number()
-    .int()
-    .min(12, 'Font size must be at least 12')
-    .max(200, 'Font size must not exceed 200')
-    .default(48)
-    .describe('Font size in points'),
-  font_color: z.string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color (e.g., #FFFFFF)')
-    .default('#FFFFFF')
-    .describe('Font color in hex format'),
-  background_color: z.string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
-    .optional()
-    .describe('Background color in hex format'),
-  background_alpha: z.number()
-    .min(0, 'Alpha must be between 0 and 1')
-    .max(1, 'Alpha must be between 0 and 1')
-    .default(0.8)
-    .describe('Background opacity (0.0 to 1.0)'),
-  shadow_enabled: z.boolean()
-    .default(false)
-    .describe('Enable text shadow'),
-  shadow_color: z.string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
-    .default('#000000')
-    .describe('Shadow color in hex format'),
-  position_x: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Horizontal position (0.0 to 1.0, where 0.5 is center)'),
-  position_y: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Vertical position (0.0 to 1.0, where 0.5 is center)'),
-  animation: z.enum(TEXT_ANIMATIONS as [string, ...string[]])
-    .optional()
-    .describe('Animation effect to apply'),
-  response_format: ResponseFormatSchema
-}).strict();
+    .describe('Backup to restore. Omit to list the available versions without changing anything.'),
+  ...CommonShape,
+};
 
-// Image schema
-export const AddImageSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add image to'),
-  image_url: UrlSchema,
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  position_x: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Horizontal position (0.0 to 1.0)'),
-  position_y: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Vertical position (0.0 to 1.0)'),
-  scale: z.number()
-    .min(0.1, 'Scale must be at least 0.1')
-    .max(5, 'Scale must not exceed 5')
-    .default(1.0)
-    .describe('Scale multiplier'),
-  rotation: z.number()
-    .min(0)
-    .max(360)
-    .default(0)
-    .describe('Rotation angle in degrees'),
-  animation: z.string()
-    .optional()
-    .describe('Animation effect to apply'),
-  response_format: ResponseFormatSchema
-}).strict();
+// Strict objects, used for standalone parsing and by the test-suite.
+export const CreateDraftSchema = z.object(CreateDraftShape).strict();
+export const AddVideoSchema = z.object(AddVideoShape).strict();
+export const AddAudioSchema = z.object(AddAudioShape).strict();
+export const AddTextSchema = z.object(AddTextShape).strict();
+export const AddImageSchema = z.object(AddImageShape).strict();
+export const AddSubtitleSchema = z.object(AddSubtitleShape).strict();
+export const AddKeyframeSchema = z.object(AddKeyframeShape).strict();
+export const AddEffectSchema = z.object(AddEffectShape).strict();
+export const AddStickerSchema = z.object(AddStickerShape).strict();
+export const SaveDraftSchema = z.object(SaveDraftShape).strict();
+export const ListAssetTypesSchema = z.object(ListAssetTypesShape).strict();
+export const RestoreBackupSchema = z.object(RestoreBackupShape).strict();
 
-// Subtitle schema
-export const AddSubtitleSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add subtitles to'),
-  srt_content: z.string()
-    .min(1, 'SRT content is required')
-    .describe('SRT formatted subtitle content'),
-  font: z.string()
-    .optional()
-    .describe('Font family name'),
-  font_size: z.number()
-    .int()
-    .min(12)
-    .max(100)
-    .default(36)
-    .describe('Font size in points'),
-  font_color: z.string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
-    .default('#FFFFFF')
-    .describe('Font color in hex format'),
-  background_enabled: z.boolean()
-    .default(true)
-    .describe('Enable background behind text'),
-  background_color: z.string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
-    .default('#000000')
-    .describe('Background color in hex format'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Keyframe schema
-export const AddKeyframeSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add keyframes to'),
-  track_name: z.string()
-    .min(1, 'Track name is required')
-    .describe('Name of the track to animate'),
-  property_types: z.array(z.string())
-    .min(1, 'At least one property type is required')
-    .describe('Properties to animate (e.g., scale_x, scale_y, alpha, rotation)'),
-  times: z.array(z.number())
-    .min(2, 'At least 2 keyframe times are required')
-    .describe('Keyframe times in seconds'),
-  values: z.array(z.string())
-    .min(2, 'At least 2 values are required')
-    .describe('Values for each keyframe'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Effect schema
-export const AddEffectSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add effect to'),
-  effect_name: z.enum(AVAILABLE_EFFECTS as [string, ...string[]])
-    .describe('Name of the effect to apply'),
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  intensity: z.number()
-    .min(0, 'Intensity must be between 0 and 1')
-    .max(1, 'Intensity must be between 0 and 1')
-    .default(0.5)
-    .describe('Effect intensity (0.0 to 1.0)'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Sticker schema
-export const AddStickerSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to add sticker to'),
-  sticker_url: UrlSchema,
-  start: z.number()
-    .min(0, 'Start time must be non-negative')
-    .describe('Start time in seconds'),
-  end: z.number()
-    .positive('End time must be positive')
-    .describe('End time in seconds'),
-  position_x: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Horizontal position (0.0 to 1.0)'),
-  position_y: z.number()
-    .min(0)
-    .max(1)
-    .default(0.5)
-    .describe('Vertical position (0.0 to 1.0)'),
-  scale: z.number()
-    .min(0.1)
-    .max(5)
-    .default(1.0)
-    .describe('Scale multiplier'),
-  rotation: z.number()
-    .min(0)
-    .max(360)
-    .default(0)
-    .describe('Rotation angle in degrees'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Save draft schema
-export const SaveDraftSchema = z.object({
-  draft_id: z.string()
-    .min(1, 'Draft ID is required')
-    .describe('The ID of the draft to save'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Get duration schema
-export const GetDurationSchema = z.object({
-  url: UrlSchema.describe('URL to the media file to analyze'),
-  response_format: ResponseFormatSchema
-}).strict();
-
-// Export type inference helpers
 export type CreateDraftInput = z.infer<typeof CreateDraftSchema>;
 export type AddVideoInput = z.infer<typeof AddVideoSchema>;
 export type AddAudioInput = z.infer<typeof AddAudioSchema>;
@@ -326,4 +353,5 @@ export type AddKeyframeInput = z.infer<typeof AddKeyframeSchema>;
 export type AddEffectInput = z.infer<typeof AddEffectSchema>;
 export type AddStickerInput = z.infer<typeof AddStickerSchema>;
 export type SaveDraftInput = z.infer<typeof SaveDraftSchema>;
-export type GetDurationInput = z.infer<typeof GetDurationSchema>;
+export type ListAssetTypesInput = z.infer<typeof ListAssetTypesSchema>;
+export type RestoreBackupInput = z.infer<typeof RestoreBackupSchema>;

@@ -1,0 +1,65 @@
+Make VectCutAPI's cloud (OSS) upload opt-in and remove its hard dependency.
+
+Two problems upstream:
+
+  1. `save_draft_impl.py` imports `oss.upload_to_oss` at module scope, and
+     `oss.py` imports `oss2` at module scope. That makes the Alibaba OSS SDK a
+     hard install requirement even though uploads default to off, and it means
+     the upload code is always loaded and one config flag away from running.
+  2. `is_upload_draft` is a plain JSON flag. A copied-in config.json, or an
+     example config pasted from the README, silently turns on uploading a zip of
+     the user's entire CapCut project to third-party object storage.
+
+After this patch the upload path requires BOTH `is_upload_draft: true` in
+config.json AND `CAPCUT_ALLOW_CLOUD_UPLOAD=1` in the environment, and `oss2` is
+imported only at that point -- so with oss2 uninstalled (see
+requirements-pinned.txt) the path fails closed instead of running.
+
+Apply with:
+    cd /path/to/VectCutAPI
+    git apply /path/to/capcut-mcp-server/vectcutapi/disable-cloud-upload.patch
+
+diff --git a/save_draft_impl.py b/save_draft_impl.py
+--- a/save_draft_impl.py
++++ b/save_draft_impl.py
+@@ -1,10 +1,11 @@
+ import os
+ import pyJianYingDraft as draft
+ import shutil
+ from util import zip_draft, build_draft_asset_path
+-from oss import upload_to_oss
++# `oss` (and its oss2 dependency) is imported lazily, only on the opt-in upload
++# path below, so cloud upload cannot run -- or even be loaded -- by default.
+ from typing import Dict, Literal
+ from draft_cache import DRAFT_CACHE
+ from save_task_cache import DRAFT_TASKS, get_task_status, update_tasks_cache, update_task_field, increment_task_field, update_task_fields, create_task
+ from downloader import download_audio, download_file, download_image, download_video
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+@@ -210,12 +211,25 @@ def save_draft_background(draft_id, draft_folder, task_id):
+         
+         written_files = write_profile_content(draft_profile, draft_dir, script.dumps(draft_profile))
+         logger.info(f"Draft information has been saved to {[str(path) for path in written_files]}.")
+ 
+         draft_url = ""
+-        # Only upload draft information when IS_UPLOAD_DRAFT is True
+-        if IS_UPLOAD_DRAFT:
++        # Uploading sends a zip of the whole project to third-party object
++        # storage. It requires two independent opt-ins: the config flag AND an
++        # explicit environment variable, so neither a stray config.json nor a
++        # stray env var is enough on its own.
++        cloud_upload_allowed = (
++            IS_UPLOAD_DRAFT and os.environ.get("CAPCUT_ALLOW_CLOUD_UPLOAD") == "1"
++        )
++        if IS_UPLOAD_DRAFT and not cloud_upload_allowed:
++            logger.info(
++                "is_upload_draft is true but CAPCUT_ALLOW_CLOUD_UPLOAD is not set; "
++                "keeping the draft local and skipping cloud upload."
++            )
++        if cloud_upload_allowed:
++            from oss import upload_to_oss
++
+             # Update task status - Start compressing draft
+             update_task_field(task_id, "progress", 80)
+             update_task_field(task_id, "message", "Compressing draft files")
+             logger.info(f"Task {task_id} progress 80%: Compressing draft files.")
+             

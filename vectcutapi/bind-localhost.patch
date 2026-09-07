@@ -1,0 +1,42 @@
+Bind VectCutAPI's Flask server to loopback only.
+
+Upstream (sun-guannan/VectCutAPI, capcut_server.py) binds 0.0.0.0, which makes
+every editing route -- all of them unauthenticated -- reachable from any host on
+the same network. The routes download arbitrary URLs via ffmpeg and write files
+under the server's working directory, so LAN exposure is a remote-write and SSRF
+primitive, not just an information leak.
+
+This MCP refuses to talk to anything but loopback, but that only constrains this
+client. Apply this patch (or pass --host 127.0.0.1, added below) so the backend
+itself cannot be reached from off-box.
+
+Apply with:
+    cd /path/to/VectCutAPI
+    git apply /path/to/capcut-mcp-server/vectcutapi/bind-localhost.patch
+
+--- a/capcut_server.py
++++ b/capcut_server.py
+@@ -1432,4 +1432,20 @@
+ 
+ 
+ if __name__ == '__main__':
+-    app.run(host='0.0.0.0', port=PORT)
++    import argparse
++
++    parser = argparse.ArgumentParser(description='VectCutAPI (local-only build)')
++    parser.add_argument(
++        '--host',
++        default='127.0.0.1',
++        help='Interface to bind. Defaults to loopback; binding a routable '
++             'interface exposes unauthenticated editing routes to the network.',
++    )
++    parser.add_argument('--port', type=int, default=PORT, help='Port to listen on')
++    args = parser.parse_args()
++
++    if args.host not in ('127.0.0.1', 'localhost', '::1'):
++        raise SystemExit(
++            f"Refusing to bind {args.host}: these routes are unauthenticated and "
++            f"must stay on loopback. Use --host 127.0.0.1."
++        )
++
++    app.run(host=args.host, port=args.port)

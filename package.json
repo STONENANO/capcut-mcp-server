@@ -1,36 +1,43 @@
 {
   "name": "capcut-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for CapCut Pro video editing API",
+  "version": "2.0.0-local",
+  "description": "Local-only MCP server for CapCut editing via a loopback VectCutAPI",
   "type": "module",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.11"
+  },
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
-    "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "prepare": "npm run build"
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "npm run typecheck",
+    "test": "npm run build:test && node --test \"dist-test/tests/*.test.js\"",
+    "smoke": "node scripts/smoke.mjs",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js"
   },
   "bin": {
     "capcut-mcp-server": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "keywords": [
     "mcp",
     "capcut",
     "video-editing",
-    "ai",
-    "automation"
+    "vectcutapi"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "express": "^4.18.2",
-    "zod": "^3.22.4",
-    "axios": "^1.6.5"
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^20.10.6",
-    "typescript": "^5.3.3"
+    "@types/node": "20.19.9",
+    "typescript": "5.9.3"
   }
 }

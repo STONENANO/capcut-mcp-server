@@ -1,0 +1,21 @@
+# Pinned VectCutAPI runtime dependencies.
+#
+# Upstream requirements.txt lists these unpinned, so two installs a week apart
+# can resolve to different code. Install with:
+#
+#     pip install -r requirements-pinned.txt
+#
+# Versions below were current when this fork was audited. Bump them
+# deliberately, one at a time, not as a batch upgrade to latest.
+flask==3.1.2
+requests==2.32.5
+imageio==2.37.0
+psutil==7.1.0
+json5==0.12.1
+
+# oss2 is intentionally omitted.
+#
+# It is only imported by oss.py, which is only reached when
+# `is_upload_draft` is true. Leaving it uninstalled makes cloud upload fail
+# closed at import time rather than depending on a config flag staying false.
+# Install it explicitly if you ever deliberately enable uploads.

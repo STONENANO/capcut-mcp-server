@@ -1,0 +1,21 @@
+{
+  // Hardened VectCutAPI config for local-only use with capcut-mcp-server.
+  // Copy to the root of your VectCutAPI checkout as `config.json`.
+
+  "draft_profile": "capcut_legacy",
+
+  // Must match CAPCUT_API_URL. VectCutAPI's code default is 9000; its shipped
+  // config.json.example says 9001. Pin it here so the two cannot drift.
+  "port": 9000,
+
+  // Never upload drafts or media to object storage. `oss_config` and
+  // `mp4_oss_config` are deliberately absent: with no credentials configured,
+  // the upload path cannot run even if this flag were flipped by accident.
+  "is_upload_draft": false,
+
+  // `draft_domain` is only used to build a preview URL string that is returned
+  // to the caller; nothing is sent to it. Upstream defaults it to a third-party
+  // domain, so it is pinned to loopback here to avoid pointing users off-box.
+  "draft_domain": "http://127.0.0.1:9000",
+  "preview_router": "/draft/downloader"
+}
