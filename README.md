@@ -231,6 +231,29 @@ npm run smoke       # manual: needs a running VectCutAPI (see scripts/smoke.mjs)
 `npm test` stubs the backend and DNS so it runs anywhere. `npm run smoke` drives
 the real built server over stdio against a live loopback VectCutAPI.
 
+### Previewing a draft without opening CapCut
+
+```bash
+python3 scripts/preview_draft.py "$CAPCUT_DRAFT_DIR/dfd_..."
+# writes preview.gif, contact-sheet.png and timeline.png into
+# $CAPCUT_DRAFT_DIR/.smartcut_previews/<draft_id>/
+```
+
+Reads the saved `draft_info.json` and the assets beside it, so what you see
+reflects what the MCP actually wrote. Useful for checking an edit landed before
+switching to CapCut, and for seeing a timeline of tracks, segments, keyframes
+and transitions at a glance.
+
+**It is not CapCut's renderer.** Layout, timing, keyframes, transitions and text
+come from the project file, but typography is approximated and effects are only
+suggested — a blur is shown at the recorded strength, other effects are not
+drawn. Video clips need ffmpeg to decode, so they appear as labelled
+placeholders; images, text and subtitles render fully. Open the draft in CapCut
+for the authoritative result.
+
+Needs Pillow, which VectCutAPI already installs as a dependency of `imageio`. It
+is a developer aid only: no MCP tool invokes it and it is not part of the build.
+
 ## License
 
 MIT. CapCut is a trademark of Bytedance Ltd. This is an unofficial project.

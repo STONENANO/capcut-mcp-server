@@ -147,6 +147,35 @@ describe('dependency pinning', () => {
   });
 });
 
+describe('preview tooling', () => {
+  const script = path.resolve(SRC_DIR, '..', 'scripts', 'preview_draft.py');
+
+  test('the preview script states that it is not CapCut\'s renderer', async () => {
+    // The script renders an approximation of a draft. If that caveat is ever
+    // edited away, its output starts looking like authoritative proof of how
+    // CapCut will render a project, which it is not.
+    const text = await readFile(script, 'utf8');
+    assert.match(text, /THIS IS NOT CAPCUT'S RENDERER/);
+    assert.match(text, /Open the draft in CapCut for the authoritative/i);
+  });
+
+  test('the preview script is not wired into the server or its dependencies', async () => {
+    // It is a developer aid: no MCP tool may invoke it, and it must not become
+    // a runtime requirement.
+    for (const { file, text } of await readAllSources()) {
+      assert.doesNotMatch(text, /preview_draft/, `${file} must not reference the preview script`);
+    }
+    const manifest = JSON.parse(
+      await readFile(path.resolve(SRC_DIR, '..', 'package.json'), 'utf8')
+    ) as { scripts: Record<string, string> };
+    assert.equal(
+      Object.values(manifest.scripts).some(s => s.includes('preview_draft')),
+      false,
+      'preview_draft.py must not run as part of build or test'
+    );
+  });
+});
+
 describe('logging hygiene', () => {
   test('nothing logs the environment or writes protocol noise to stdout', async () => {
     for (const { file, text } of await readAllSources()) {
