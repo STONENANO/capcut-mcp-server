@@ -65,7 +65,15 @@ pip3 install -r ~/capcut-mcp-server/vectcutapi/requirements-pinned.txt
 python3 capcut_server.py --host 127.0.0.1 --port 9000
 ```
 
-After the patch, `--host` defaults to loopback and refuses anything else.
+After the patch, `--host` defaults to loopback and refuses anything else. A
+successful start prints:
+
+```
+VectCutAPI listening on http://127.0.0.1:9000 (loopback only)
+ * Running on http://127.0.0.1:9000
+```
+
+Leave that terminal open — it is a server, not a one-off command.
 
 **Python version.** VectCutAPI declares `requires-python = ">=3.10"`, and macOS
 ships 3.9 — on which it fails at import with

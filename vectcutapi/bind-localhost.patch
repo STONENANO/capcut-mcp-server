@@ -14,9 +14,10 @@ Apply with:
     cd /path/to/VectCutAPI
     git apply /path/to/capcut-mcp-server/vectcutapi/bind-localhost.patch
 
+diff --git a/capcut_server.py b/capcut_server.py
 --- a/capcut_server.py
 +++ b/capcut_server.py
-@@ -1432,4 +1432,20 @@
+@@ -1432,4 +1432,23 @@ def get_video_character_effect_types():
  
  
  if __name__ == '__main__':
@@ -39,4 +40,5 @@ Apply with:
 +            f"must stay on loopback. Use --host 127.0.0.1."
 +        )
 +
++    print(f"VectCutAPI listening on http://{args.host}:{args.port} (loopback only)", flush=True)
 +    app.run(host=args.host, port=args.port)
