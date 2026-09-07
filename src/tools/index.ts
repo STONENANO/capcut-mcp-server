@@ -280,7 +280,10 @@ Position uses CapCut's normalised canvas coordinates via transform_x/transform_y
 font_size is CapCut's own scale (about 1-100, default 8), not points.
 
 A background is only drawn when background_alpha > 0. Animation names come from
-capcut_list_asset_types(category="text_intro" / "text_outro").`
+capcut_list_asset_types(category="text_intro" / "text_outro").
+
+Two overlapping captions need two different track_name values: CapCut rejects a
+segment that overlaps another on the same track.`
       ),
       inputSchema: AddTextSchema,
       annotations: MUTATING_ANNOTATIONS,

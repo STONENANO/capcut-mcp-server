@@ -146,6 +146,10 @@ route, so the tool could never have worked.
 CapCut matches effects, transitions, fonts and animations by **exact name**.
 Call `capcut_list_asset_types` first rather than guessing.
 
+Segments on a single track may not overlap in time — CapCut rejects the second
+one. Layer overlapping elements by giving them different `track_name` values.
+This applies to video, image, audio, text and effect segments alike.
+
 ### Example
 
 ```jsonc

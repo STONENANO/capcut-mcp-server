@@ -46,7 +46,11 @@ const DraftIdSchema = z
 const TrackNameSchema = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'Track name must be 1-64 alphanumeric/._- characters')
-  .describe('Timeline track name; segments sharing a name land on the same track');
+  .describe(
+    'Timeline track name; segments sharing a name land on the same track. ' +
+      'Segments on ONE track may not overlap in time -- CapCut rejects the second ' +
+      'one. To show two things at once, put them on different track names.'
+  );
 
 /** CapCut asset names come from the backend catalogues and may be non-ASCII. */
 const AssetNameSchema = z
