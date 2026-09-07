@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test, { describe } from 'node:test';
@@ -512,6 +512,58 @@ describe('save_draft backups', () => {
     assert.equal(requests[0].url, 'http://127.0.0.1:9000/save_draft');
     assert.equal(requests[0].body!.draft_folder, draftDir);
     assert.equal(requests[0].body!.draft_id, 'dfd_project');
+  });
+
+  test('save_draft points the CapCut metadata at this machine', async () => {
+    const { draftDir, projectDir } = await draftDirWithProject();
+    // The template values VectCutAPI actually ships.
+    await writeFile(
+      path.join(projectDir, 'draft_meta_info.json'),
+      JSON.stringify({
+        draft_fold_path: '/Users/sunguannan/Movies/CapCut/User Data/Projects/com.lveditor.draft/0707',
+        draft_root_path: '/Users/sunguannan/Movies/CapCut/User Data/Projects/com.lveditor.draft',
+        draft_id: '989869B1-B560-489C-9C6F-4B444F24BF36',
+        draft_name: '0707',
+      })
+    );
+
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig({ draftDir }), fetchImpl);
+    const result = await client.callTool({
+      name: 'capcut_save_draft',
+      arguments: { draft_id: 'dfd_project' },
+    });
+
+    assert.equal(isError(result), false, textOf(result));
+    const meta = JSON.parse(
+      await readFile(path.join(projectDir, 'draft_meta_info.json'), 'utf8')
+    ) as Record<string, unknown>;
+    assert.equal(meta.draft_fold_path, projectDir);
+    assert.equal(meta.draft_root_path, draftDir);
+    assert.equal(meta.draft_name, 'dfd_project');
+    assert.notEqual(meta.draft_id, '989869B1-B560-489C-9C6F-4B444F24BF36');
+    assert.doesNotMatch(JSON.stringify(meta), /sunguannan/);
+
+    const reported = (result as unknown as {
+      structuredContent: { capcut_metadata: { repaired: boolean } };
+    }).structuredContent.capcut_metadata;
+    assert.equal(reported.repaired, true);
+  });
+
+  test('save_draft says so when the CapCut metadata could not be repaired', async () => {
+    // No draft_meta_info.json: the save still succeeds, but the caller is told
+    // the draft may not appear in CapCut rather than being left to wonder.
+    const { draftDir } = await draftDirWithProject();
+    const { fetchImpl } = fakeBackend();
+    const client = await connect(await testConfig({ draftDir }), fetchImpl);
+
+    const result = await client.callTool({
+      name: 'capcut_save_draft',
+      arguments: { draft_id: 'dfd_project' },
+    });
+
+    assert.equal(isError(result), false, textOf(result));
+    assert.match(textOf(result), /may not appear in CapCut/);
   });
 
   test('repeated saves in one session coalesce to a single snapshot', async () => {

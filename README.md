@@ -218,6 +218,31 @@ sent these; the backend does not accept them.
 | Audio fades | `fade_in`/`fade_out` | not supported — removed from the schema |
 | Draft creation | `fps` | not supported — derived from source media |
 | Default port | `9001` | `9000` in code (`9001` only in the example config) |
+| Saved project identity | template copied verbatim | `draft_meta_info.json` must point at *this* machine — see below |
+
+### Why drafts didn't appear in CapCut
+
+VectCutAPI builds each saved draft by copying a template directory and never
+rewrites `draft_meta_info.json`, so every draft shipped the template author's
+own values:
+
+```
+draft_fold_path  /Users/sunguannan/Movies/CapCut/.../com.lveditor.draft/0707
+draft_root_path  /Users/sunguannan/Movies/CapCut/.../com.lveditor.draft
+draft_id         989869B1-B560-489C-9C6F-4B444F24BF36   (identical in every draft)
+draft_name       0707
+tm_duration      0
+```
+
+CapCut builds its Projects list from that file, so drafts claiming a directory
+that doesn't exist on your machine — all sharing one UUID — don't show up. The
+timeline itself was always correct; only its identity was wrong.
+
+`capcut_save_draft` now rewrites those fields to the real project path, a UUID
+derived from the draft id (stable across re-saves, so CapCut doesn't accumulate
+duplicates), the real duration, and clears the cover reference when no
+`draft_cover.jpg` exists. Content is untouched. If the repair can't run, the
+tool result says the draft may not appear rather than reporting a clean save.
 
 ## Development
 

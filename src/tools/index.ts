@@ -45,6 +45,7 @@ import {
   type CapCutApiClient,
 } from '../services/api-client.js';
 import { createBackup, listBackups, resolveProjectDir, restoreBackup } from '../services/backup.js';
+import { repairDraftMetadata } from '../services/capcut-meta.js';
 import {
   validateMediaReference,
   type MediaGuardOptions,
@@ -437,6 +438,11 @@ capcut_add_image instead.`
         `Write the draft into your CapCut projects folder (CAPCUT_DRAFT_DIR).
 
 This is the only tool that touches files CapCut itself reads. Before writing, the
+After saving, the project's CapCut metadata (draft_meta_info.json) is pointed at
+this machine: VectCutAPI copies its template verbatim, leaving every draft
+claiming the template author's file paths and sharing one UUID, which stops
+CapCut from listing them.
+
 VectCutAPI DELETES the existing project directory and rebuilds it when it saves,
 so the whole project is snapshotted first to
 <draft dir>/.smartcut_backups/<draft id>/<timestamp>/ -- outside the project, so
@@ -466,6 +472,12 @@ CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.`
           draft_folder: draftDir,
         });
 
+        // VectCutAPI copies its draft template verbatim, so the saved project
+        // still claims to live on the template author's machine and shares one
+        // UUID with every other draft. CapCut builds its Projects list from
+        // that file, so without this the draft never appears.
+        const metadata = await repairDraftMetadata(projectDir, draftDir, input.draft_id);
+
         const payload = {
           saved: output,
           backup: backup.created
@@ -476,11 +488,28 @@ CAPCUT_BACKUP_COALESCE_SECONDS of each other are coalesced into one.`
                 bytes: backup.record?.bytes,
               }
             : { created: false, reason: backup.skippedReason },
+          capcut_metadata: metadata.repaired
+            ? { repaired: true, fields: metadata.changed }
+            : { repaired: false, reason: metadata.reason },
         };
-        const summary = backup.created
-          ? `## Draft saved\n\nBacked up to \`${backup.record?.version}\` before writing.`
-          : `## Draft saved\n\nNo new backup: ${backup.skippedReason}.`;
-        return ok(summary, payload, input.response_format);
+
+        const lines = [
+          '## Draft saved',
+          '',
+          backup.created
+            ? `Backed up to \`${backup.record?.version}\` before writing.`
+            : `No new backup: ${backup.skippedReason}.`,
+        ];
+        if (metadata.repaired) {
+          lines.push('', 'Project metadata pointed at this machine so CapCut lists the draft.');
+        } else {
+          lines.push(
+            '',
+            `Note: CapCut project metadata was NOT repaired (${metadata.reason}). ` +
+              'The draft may not appear in CapCut\'s project list.'
+          );
+        }
+        return ok(lines.join('\n'), payload, input.response_format);
       } catch (error) {
         return fail(error);
       }
